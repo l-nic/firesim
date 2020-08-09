@@ -415,14 +415,14 @@ bool count_start_message() {
 double get_avg_service_time() {
     // Compute avg_service_time
     double avg_service_time;
-    if (strcmp(dist_type, "FIXED") == 0) {
+    if (strcmp(service_dist_type, "FIXED") == 0) {
         avg_service_time = (double)fixed_dist_cycles;
-    } else if (strcmp(dist_type, "EXP") == 0) {
+    } else if (strcmp(service_dist_type, "EXP") == 0) {
         avg_service_time = exp_dist_scale_factor * (1.0 / exp_dist_decay_const);
-    } else if (strcmp(dist_type, "BIMODAL") == 0) {
+    } else if (strcmp(service_dist_type, "BIMODAL") == 0) {
         avg_service_time = bimodal_dist_high_mean * bimodal_dist_fraction_high + bimodal_dist_low_mean * (1.0 - bimodal_dist_fraction_high);
     } else {
-        fprintf(stdout, "Unknown distribution type: %s\n", dist_type);
+        fprintf(stdout, "Unknown distribution type: %s\n", service_dist_type);
         exit(-1);
     }
     return avg_service_time;
@@ -479,21 +479,29 @@ bool should_generate_packet_this_cycle() {
         return false;
     }
     if (this_iter_cycles_start >= next_threshold) {
-        next_threshold = this_iter_cycles_start + (uint64_t)(*gen_dist)(*gen_rand);
+        // compute when the next request should be sent
+        if (strcmp(request_dist_type, "FIXED") == 0) {
+            next_threshold = this_iter_cycles_start + request_rate_lambda_inverse;
+        } else if (strcmp(request_dist_type, "EXP") == 0) {
+            next_threshold = this_iter_cycles_start + (uint64_t)(*gen_dist)(*gen_rand);
+        } else {
+            fprintf(stdout, "Unknown distribution type: %s\n", service_dist_type);
+            exit(-1);
+        }
         return true;
     }
     return false;
 }
 
 uint64_t get_service_time(int &dist) {
-    if (strcmp(dist_type, "FIXED") == 0) {
+    if (strcmp(service_dist_type, "FIXED") == 0) {
         dist = 0;
         return fixed_dist_cycles;
-    } else if (strcmp(dist_type, "EXP") == 0) {
+    } else if (strcmp(service_dist_type, "EXP") == 0) {
         double exp_value = exp_dist_scale_factor * (*service_exp_dist)(*dist_rand);
         dist = 0;
         return std::min(std::max((uint64_t)exp_value, min_service_time), max_service_time);
-    } else if (strcmp(dist_type, "BIMODAL") == 0) {
+    } else if (strcmp(service_dist_type, "BIMODAL") == 0) {
         double service_low = (*service_normal_low)(*dist_rand);
         double service_high = (*service_normal_high)(*dist_rand);
         int select_high = (*service_select_dist)(*dist_rand);
@@ -505,7 +513,7 @@ uint64_t get_service_time(int &dist) {
             return std::min(std::max((uint64_t)service_low, min_service_time), max_service_time);
         }
     } else {
-        fprintf(stdout, "Unknown distribution type: %s\n", dist_type);
+        fprintf(stdout, "Unknown distribution type: %s\n", service_dist_type);
         exit(-1);
     }
 
