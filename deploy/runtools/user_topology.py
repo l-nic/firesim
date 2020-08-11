@@ -271,6 +271,9 @@ class UserTopologies(object):
     def lnic_2xlarge_64config(self):
         self.lnic_2xlarge_Nconfig(64)
 
+    def lnic_2xlarge_90config(self):
+        self.lnic_2xlarge_Nconfig(90)
+
     def lnic_2xlarge_100config(self):
         self.lnic_2xlarge_Nconfig(100)
 
