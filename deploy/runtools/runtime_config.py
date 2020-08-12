@@ -237,8 +237,12 @@ class InnerRuntimeConfiguration:
     class LoadGenStats:
         use_load_gen = None
         test_type = None
-        dist_type = None
-        request_rate_lambda_inverse = None
+        service_dist_type = None
+        request_dist_type = None
+        num_requests = None
+        request_rate_lambda_inverse_start = None
+        request_rate_lambda_inverse_stop = None
+        request_rate_lambda_inverse_dec = None
         min_service_time = None
         max_service_time = None
         exp_dist_scale_factor = None
@@ -306,8 +310,12 @@ class InnerRuntimeConfiguration:
             self.load_gen_stats = self.LoadGenStats()
             self.load_gen_stats.use_load_gen = runtime_dict['load_gen']['use_load_gen'] == "yes"
             self.load_gen_stats.test_type = runtime_dict['load_gen']['test_type']
-            self.load_gen_stats.dist_type = runtime_dict['load_gen']['dist_type']
-            self.load_gen_stats.request_rate_lambda_inverse = runtime_dict['load_gen']['request_rate_lambda_inverse']
+            self.load_gen_stats.service_dist_type = runtime_dict['load_gen']['service_dist_type']
+            self.load_gen_stats.request_dist_type = runtime_dict['load_gen']['request_dist_type']
+            self.load_gen_stats.num_requests = runtime_dict['load_gen']['num_requests']
+            self.load_gen_stats.request_rate_lambda_inverse_start = runtime_dict['load_gen']['request_rate_lambda_inverse_start']
+            self.load_gen_stats.request_rate_lambda_inverse_stop = runtime_dict['load_gen']['request_rate_lambda_inverse_stop']
+            self.load_gen_stats.request_rate_lambda_inverse_dec = runtime_dict['load_gen']['request_rate_lambda_inverse_dec']
             self.load_gen_stats.min_service_time = runtime_dict['load_gen']['min_service_time']
             self.load_gen_stats.max_service_time = runtime_dict['load_gen']['max_service_time']
             self.load_gen_stats.exp_dist_scale_factor = runtime_dict['load_gen']['exp_dist_scale_factor']

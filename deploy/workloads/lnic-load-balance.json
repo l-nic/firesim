@@ -1,8 +1,0 @@
-{
-	"benchmark_name": "lnic-load-balance",
-	"common_simulation_outputs": [
-		"uartlog"
-	],
-	"common_bootbinary": "../../../../../software/firemarshal/lnic-workloads/lnic-load-balance/lnic-load-balance.riscv",
-	"common_rootfs": "../../../../../software/firemarshal/wlutil/dummy.rootfs"
-}

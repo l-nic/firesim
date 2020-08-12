@@ -107,6 +107,7 @@ uint64_t this_iter_cycles_start = 0;
 // Comment this out to disable pkt trimming
 #define TRIM_PKTS
 
+// TODO: these should really be exposed via config_runtime.ini
 #define LOG_QUEUE_SIZE
 #define LOG_EVENTS
 #define LOG_ALL_PACKETS
@@ -183,6 +184,12 @@ class parsed_packet_t {
 #define NIC_IP "10.0.0.2"
 #define MAX_TX_MSG_ID 127
 #define APP_HEADER_SIZE 16
+uint64_t tx_request_count = 0;
+uint64_t rx_request_count = 0;
+uint64_t request_rate_lambda_inverse;
+bool load_generator_complete = false;
+bool request_tx_done = false;
+uint64_t request_tx_done_time;
 uint64_t next_threshold = 0;
 uint16_t global_tx_msg_id = 0;
 bool start_message_received = false;
@@ -196,6 +203,7 @@ std::normal_distribution<double>* service_normal_low;
 std::binomial_distribution<int>* service_select_dist;
 void load_gen_hook(switchpacket* tsp);
 void generate_load_packets();
+void check_request_timeout();
 #endif
 
 // These are both set by command-line arguments. Don't change them here.
@@ -353,6 +361,7 @@ while (!pqueue.empty()) {
 
 #ifdef USE_LOAD_GEN
 generate_load_packets();
+check_request_timeout();
 #endif
 
 // Log queue sizes if logging is enabled
@@ -403,6 +412,22 @@ bool count_start_message() {
     }
 }
 
+double get_avg_service_time() {
+    // Compute avg_service_time
+    double avg_service_time;
+    if (strcmp(service_dist_type, "FIXED") == 0) {
+        avg_service_time = (double)fixed_dist_cycles;
+    } else if (strcmp(service_dist_type, "EXP") == 0) {
+        avg_service_time = exp_dist_scale_factor * (1.0 / exp_dist_decay_const);
+    } else if (strcmp(service_dist_type, "BIMODAL") == 0) {
+        avg_service_time = bimodal_dist_high_mean * bimodal_dist_fraction_high + bimodal_dist_low_mean * (1.0 - bimodal_dist_fraction_high);
+    } else {
+        fprintf(stdout, "Unknown distribution type: %s\n", service_dist_type);
+        exit(-1);
+    }
+    return avg_service_time;
+}
+
 void log_packet_response_time(parsed_packet_t* packet) {
     // TODO: We need to print a header as well to record what the parameters for this run were.
     uint64_t service_time = be64toh(packet->app->getAppHeader()->service_time);
@@ -411,37 +436,84 @@ void log_packet_response_time(parsed_packet_t* packet) {
     uint64_t recv_time = packet->tsp->timestamp; // TODO: This accounts for tokens, even though sends don't. Is that a problem?
     uint64_t iter_time = this_iter_cycles_start;
     uint64_t delta_time = (recv_time > sent_time) ? (recv_time - sent_time) : 0;
-    fprintf(stdout, "&&CSV&&ResponseTimes,%ld,%ld,%ld,%ld,%ld,%d\n", service_time, delta_time, sent_time, recv_time, iter_time, src_context);
+    fprintf(stdout, "&&CSV&&ResponseTimes,%ld,%ld,%ld,%ld,%ld,%d,%f,%ld\n",
+      service_time, delta_time, sent_time, recv_time, iter_time, src_context, get_avg_service_time(), request_rate_lambda_inverse);
+}
+
+void update_load() {
+    // We've sent and received all required requests for the current load.
+    // OR we've timed out and some requests were dropped.
+    // Check if we are done or if we should move to the next load.
+    if (request_rate_lambda_inverse <= request_rate_lambda_inverse_stop) {
+        load_generator_complete = true;
+        fprintf(stdout, "---- Load Generator Complete! ----\n");
+        // TODO: Maybe we should send a "DONE" msg to the server and have it shutdown gracefully?
+    } else {
+        // Move to the next load
+        // Update the load generation distribution
+        request_rate_lambda_inverse -= request_rate_lambda_inverse_dec;
+        double request_rate_lambda = 1.0 / (double)request_rate_lambda_inverse;
+        std::exponential_distribution<double>::param_type new_lambda(request_rate_lambda);
+        gen_dist->param(new_lambda);
+        // Reset accounting state
+        tx_request_count = 0;
+        rx_request_count = 0;
+        request_tx_done = false;
+        fprintf(stdout, "---- New Avg Arrival Time: %ld ----\n", request_rate_lambda_inverse);
+    }
+}
+
+void check_request_timeout() {
+    // It's possible that the DUT dropped some requests so we will never receive all the responses.
+    // In this case, we need to timeout and move onto the next load.
+    // NOTE: if we timeout too early then we will receive too many responses in the next iteration ...
+    uint64_t timeout_cycles = get_avg_service_time() * num_requests * 2;
+    if (!load_generator_complete && request_tx_done && (this_iter_cycles_start >= request_tx_done_time + timeout_cycles)) {
+        fprintf(stdout, "---- Timeout! Not all responses received! ----\n");
+        update_load();
+    }
 }
 
 bool should_generate_packet_this_cycle() {
-    if (!start_message_received) {
+    if (!start_message_received || (tx_request_count >= num_requests)) {
         return false;
     }
     if (this_iter_cycles_start >= next_threshold) {
-        next_threshold = this_iter_cycles_start + (uint64_t)(*gen_dist)(*gen_rand);
+        // compute when the next request should be sent
+        if (strcmp(request_dist_type, "FIXED") == 0) {
+            next_threshold = this_iter_cycles_start + request_rate_lambda_inverse;
+        } else if (strcmp(request_dist_type, "EXP") == 0) {
+            next_threshold = this_iter_cycles_start + (uint64_t)(*gen_dist)(*gen_rand);
+        } else {
+            fprintf(stdout, "Unknown distribution type: %s\n", service_dist_type);
+            exit(-1);
+        }
         return true;
     }
     return false;
 }
 
-uint64_t get_service_time() {
-    if (strcmp(dist_type, "FIXED") == 0) {
+uint64_t get_service_time(int &dist) {
+    if (strcmp(service_dist_type, "FIXED") == 0) {
+        dist = 0;
         return fixed_dist_cycles;
-    } else if (strcmp(dist_type, "EXP") == 0) {
+    } else if (strcmp(service_dist_type, "EXP") == 0) {
         double exp_value = exp_dist_scale_factor * (*service_exp_dist)(*dist_rand);
+        dist = 0;
         return std::min(std::max((uint64_t)exp_value, min_service_time), max_service_time);
-    } else if (strcmp(dist_type, "BIMODAL") == 0) {
+    } else if (strcmp(service_dist_type, "BIMODAL") == 0) {
         double service_low = (*service_normal_low)(*dist_rand);
         double service_high = (*service_normal_high)(*dist_rand);
         int select_high = (*service_select_dist)(*dist_rand);
         if (select_high) {
+            dist = 1;
             return std::min(std::max((uint64_t)service_high, min_service_time), max_service_time);
         } else {
+            dist = 0;
             return std::min(std::max((uint64_t)service_low, min_service_time), max_service_time);
         }
     } else {
-        fprintf(stdout, "Unknown distribution type: %s\n", dist_type);
+        fprintf(stdout, "Unknown distribution type: %s\n", service_dist_type);
         exit(-1);
     }
 
@@ -498,8 +570,18 @@ void send_load_packet(uint16_t dst_context, uint64_t service_time, uint64_t sent
         free(new_tsp);
         return;
     }
+#ifdef LOG_ALL_PACKETS
     print_packet("LOAD", &sent_packet);
+#endif
     send_with_priority(0, new_tsp);
+    tx_request_count++;
+    fprintf(stdout, "&&CSV&&RequestStats,%ld,%ld,%d,%f,%ld\n",
+      sent_time, service_time, dst_context, get_avg_service_time(), request_rate_lambda_inverse);
+    // check if we are done sending requests
+    if (tx_request_count >= num_requests) {
+        request_tx_done = true;
+        request_tx_done_time = sent_time;
+    }
 }
 
 void load_gen_hook(switchpacket* tsp) {
@@ -510,8 +592,9 @@ void load_gen_hook(switchpacket* tsp) {
         fprintf(stdout, "Invalid received packet.\n");
         return;
     }
+#ifdef LOG_ALL_PACKETS
     print_packet("RECV", &packet);
-
+#endif
     // Send ACK+PULL responses to DATA packets
     // TODO: This only works for one-packet messages for now
     if (packet.lnic->getLnicHeader()->flags & LNIC_DATA_FLAG_MASK) {
@@ -556,16 +639,24 @@ void load_gen_hook(switchpacket* tsp) {
             free(new_tsp);
             return;
         }
+#ifdef LOG_ALL_PACKETS
         print_packet("SEND", &sent_packet);
+#endif
         send_with_priority(0, new_tsp);
 
         // Check for nanoPU startup messages
         if (!start_message_received) {
             if(count_start_message()) {
                 start_message_received = true;
+                fprintf(stdout, "---- All Start Msgs Received! ---\n");
             }
         } else {
             log_packet_response_time(&packet);
+            rx_request_count++;
+            if (rx_request_count >= num_requests) {
+                // All responses received -- move to the next load
+                update_load();
+            }
         }
     }
 }
@@ -576,15 +667,19 @@ void generate_load_packets() {
     if (!should_generate_packet_this_cycle()) {
         return;
     }
-    uint64_t service_time = get_service_time();
+    int dist; // indicates which distribution is selected
+    uint64_t service_time = get_service_time(dist);
     uint64_t sent_time = this_iter_cycles_start; // TODO: Check this
 
     if (strcmp(test_type, "ONE_CONTEXT_FOUR_CORES") == 0) {
         send_load_packet(0, service_time, sent_time);
     } else if (strcmp(test_type, "FOUR_CONTEXTS_FOUR_CORES") == 0) {
         send_load_packet(rand() % 4, service_time, sent_time);
-    } else if ((strcmp(test_type, "TWO_CONTEXTS_FOUR_SHARED_CORES") == 0) ||
-               (strcmp(test_type, "DIF_PRIORITY_LNIC_DRIVEN") == 0) ||
+    } else if (strcmp(test_type, "TWO_CONTEXTS_FOUR_SHARED_CORES") == 0) {
+        // send request to context 0 if low distribution is selected
+        // send request to context 1 if high distribution is selected
+        send_load_packet(dist, service_time, sent_time);
+    } else if ((strcmp(test_type, "DIF_PRIORITY_LNIC_DRIVEN") == 0) ||
                (strcmp(test_type, "DIF_PRIORITY_TIMER_DRIVEN") == 0) ||
                (strcmp(test_type, "HIGH_PRIORITY_C1_STALL") == 0) ||
                (strcmp(test_type, "LOW_PRIORITY_C1_STALL") == 0)) {
@@ -732,6 +827,7 @@ int main (int argc, char *argv[]) {
     LOW_PRIORITY_OBUF_SIZE = atoi(argv[5]);
 
 #ifdef USE_LOAD_GEN
+    request_rate_lambda_inverse = request_rate_lambda_inverse_start;
     double request_rate_lambda = 1.0 / (double)request_rate_lambda_inverse;
     gen_rand = new std::default_random_engine;
     gen_dist = new std::exponential_distribution<double>(request_rate_lambda);
@@ -740,6 +836,7 @@ int main (int argc, char *argv[]) {
     service_normal_high = new std::normal_distribution<double>(bimodal_dist_high_mean, bimodal_dist_high_stdev);
     service_normal_low = new std::normal_distribution<double>(bimodal_dist_low_mean, bimodal_dist_low_stdev);
     service_select_dist = new std::binomial_distribution<int>(1, bimodal_dist_fraction_high);
+    fprintf(stdout, "---- New Avg Arrival Time: %ld ----\n", request_rate_lambda_inverse);
 #endif
 
     simplify_frac(bandwidth, 200, &throttle_numer, &throttle_denom);

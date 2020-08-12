@@ -271,8 +271,14 @@ class UserTopologies(object):
     def lnic_2xlarge_64config(self):
         self.lnic_2xlarge_Nconfig(64)
 
+    def lnic_2xlarge_90config(self):
+        self.lnic_2xlarge_Nconfig(90)
+
     def lnic_2xlarge_100config(self):
         self.lnic_2xlarge_Nconfig(100)
+
+    def lnic_2xlarge_110config(self):
+        self.lnic_2xlarge_Nconfig(110)
 
     def lnic_2xlarge_supernode_4config(self):
         # Use 1 f1.2xlarge instance to host a single supernode with 4 total nanopu's
