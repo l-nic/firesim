@@ -1,0 +1,8 @@
+{
+	"benchmark_name": "lnic-multi-core-mica",
+	"common_simulation_outputs": [
+		"uartlog"
+	],
+	"common_bootbinary": "../../../../../software/firemarshal/lnic-workloads/lnic-multi-core-mica/lnic-multi-core-mica.riscv",
+	"common_rootfs": "../../../../../software/firemarshal/wlutil/dummy.rootfs"
+}
