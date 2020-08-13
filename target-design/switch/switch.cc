@@ -104,6 +104,17 @@ uint64_t this_iter_cycles_start = 0;
 #define LNIC_PACKET_CHOPPED_SIZE   72 // Bytes, the minimum L-NIC packet size
 #define LNIC_HEADER_SIZE           30
 
+#define MICA_R_TYPE 1
+#define MICA_W_TYPE 2
+#define MICA_VALUE_SIZE_WORDS 64
+#define MICA_KEY_SIZE_WORDS   2
+struct __attribute__((__packed__)) mica_hdr_t {
+  uint64_t op_type;
+  uint64_t key[MICA_KEY_SIZE_WORDS];
+  uint64_t value[MICA_VALUE_SIZE_WORDS];
+};
+
+
 // Comment this out to disable pkt trimming
 #define TRIM_PKTS
 
@@ -119,6 +130,7 @@ uint64_t this_iter_cycles_start = 0;
 #ifdef USE_LOAD_GEN
 #include "LnicLayer.h"
 #include "AppLayer.h"
+#include "PayloadLayer.h"
 class parsed_packet_t {
  private:
     pcpp::Packet* pcpp_packet;
@@ -197,6 +209,7 @@ uint64_t global_start_message_count = 0;
 std::exponential_distribution<double>* gen_dist;
 std::default_random_engine* gen_rand;
 std::exponential_distribution<double>* service_exp_dist;
+std::uniform_int_distribution<>* service_key_uniform_dist;
 std::default_random_engine* dist_rand;
 std::normal_distribution<double>* service_normal_high;
 std::normal_distribution<double>* service_normal_low;
@@ -519,6 +532,10 @@ uint64_t get_service_time(int &dist) {
 
 }
 
+uint64_t get_service_key() {
+  return (*service_key_uniform_dist)(*dist_rand);
+}
+
 uint16_t get_next_tx_msg_id() {
     uint16_t to_return = global_tx_msg_id;
     global_tx_msg_id++;
@@ -535,23 +552,50 @@ void send_load_packet(uint16_t dst_context, uint64_t service_time, uint64_t sent
     new_ip_layer.getIPv4Header()->ipId = htons(1);
     new_ip_layer.getIPv4Header()->timeToLive = 64;
     new_ip_layer.getIPv4Header()->protocol = 153; // Protocol code for LNIC
-    uint64_t data_packet_size_bytes = ETHER_HEADER_SIZE + IP_HEADER_SIZE + LNIC_HEADER_SIZE + APP_HEADER_SIZE;
+
+    uint16_t tx_msg_id = get_next_tx_msg_id();
 
     // Build the new lnic and application packet layers
     pcpp::LnicLayer new_lnic_layer(0, 0, 0, 0, 0, 0, 0, 0, 0);
     new_lnic_layer.getLnicHeader()->flags = (uint8_t)LNIC_DATA_FLAG_MASK;
-    new_lnic_layer.getLnicHeader()->msg_len = htons(16);
     new_lnic_layer.getLnicHeader()->src_context = htons(0);
     new_lnic_layer.getLnicHeader()->dst_context = htons(dst_context);
-    new_lnic_layer.getLnicHeader()->tx_msg_id = htons(get_next_tx_msg_id());
+    new_lnic_layer.getLnicHeader()->tx_msg_id = htons(tx_msg_id);
     pcpp::AppLayer new_app_layer(service_time, sent_time);
 
+    uint16_t msg_len = new_app_layer.getHeaderLen();
+    pcpp::PayloadLayer new_payload_layer(0, 0, false);
+
+    if (strcmp(load_type, "MICA") == 0) {
+      struct mica_hdr_t mica_hdr;
+      uint16_t mica_hdr_size;
+      mica_hdr.key[0] = htobe64(get_service_key());
+      mica_hdr.key[1] = htobe64(0x0);
+      if (tx_msg_id % 2 == 0) {
+        mica_hdr.op_type = htobe64(MICA_W_TYPE);
+        mica_hdr.value[0] = htobe64(0x7);
+        mica_hdr_size = sizeof(mica_hdr);
+      }
+      else {
+        mica_hdr.op_type = htobe64(MICA_R_TYPE);
+        mica_hdr_size = sizeof(mica_hdr) - sizeof(mica_hdr.value);
+      }
+      new_payload_layer = pcpp::PayloadLayer((uint8_t*)&mica_hdr, mica_hdr_size, false);
+      msg_len += + new_payload_layer.getHeaderLen();
+    }
+
+    new_lnic_layer.getLnicHeader()->msg_len = htons(msg_len);
+
     // Join the layers into a new packet
+    uint64_t data_packet_size_bytes = ETHER_HEADER_SIZE + IP_HEADER_SIZE + LNIC_HEADER_SIZE + msg_len;
     pcpp::Packet new_packet(data_packet_size_bytes);
     new_packet.addLayer(&new_eth_layer);
     new_packet.addLayer(&new_ip_layer);
     new_packet.addLayer(&new_lnic_layer);
     new_packet.addLayer(&new_app_layer);
+    if (strcmp(load_type, "MICA") == 0)
+      new_packet.addLayer(&new_payload_layer);
+
     new_packet.computeCalculateFields();
 
     // Convert the packet to a switchpacket
@@ -733,7 +777,7 @@ void send_with_priority(uint16_t port, switchpacket* tsp) {
     fprintf(stdout, "%ld: IP(src=%s, dst=%s), LNIC(flags=%s, msg_len=%d, src_context=%d, dst_context=%d), packet_len=%d, port=%d\n",
                      tsp->timestamp, ip_src_addr.c_str(), ip_dst_addr.c_str(), flags_str.c_str(), lnic_msg_len_bytes,
                      lnic_src_context, lnic_dst_context, packet_size_bytes, port);
-#endif LOG_ALL_PACKETS
+#endif // LOG_ALL_PACKETS
 
     if (is_data && !is_chop) {
         // Regular data, send to low priority queue or chop and send to high priority
@@ -832,6 +876,7 @@ int main (int argc, char *argv[]) {
     gen_rand = new std::default_random_engine;
     gen_dist = new std::exponential_distribution<double>(request_rate_lambda);
     dist_rand = new std::default_random_engine;
+    service_key_uniform_dist = new std::uniform_int_distribution<>(min_service_key, max_service_key);
     service_exp_dist = new std::exponential_distribution<double>(exp_dist_decay_const);
     service_normal_high = new std::normal_distribution<double>(bimodal_dist_high_mean, bimodal_dist_high_stdev);
     service_normal_low = new std::normal_distribution<double>(bimodal_dist_low_mean, bimodal_dist_low_stdev);
