@@ -214,7 +214,7 @@ std::default_random_engine* dist_rand;
 std::normal_distribution<double>* service_normal_high;
 std::normal_distribution<double>* service_normal_low;
 std::binomial_distribution<int>* service_select_dist;
-void load_gen_hook(switchpacket* tsp);
+bool load_gen_hook(switchpacket* tsp);
 void generate_load_packets();
 void check_request_timeout();
 #endif
@@ -341,9 +341,10 @@ while (!pqueue.empty()) {
 
 // If this is a load generator, we need to do something completely different with all incoming packets.
 #ifdef USE_LOAD_GEN
-    load_gen_hook(tsp);
-    free(tsp);
-    continue;
+    if (load_gen_hook(tsp)) {
+      free(tsp);
+      continue;
+    }
 #endif
 
     int flit_offset_doublebytes = (ETHER_HEADER_SIZE + IP_DST_FIELD_OFFSET + IP_SUBNET_OFFSET) / sizeof(uint16_t);
@@ -628,13 +629,19 @@ void send_load_packet(uint16_t dst_context, uint64_t service_time, uint64_t sent
     }
 }
 
-void load_gen_hook(switchpacket* tsp) {
+// Returns true if this packet is for the load generator, otherwise returns
+// false, indicating that the switch should process the packet as usual
+bool load_gen_hook(switchpacket* tsp) {
     // Parse and log the incoming packet
     parsed_packet_t packet;
     bool is_valid = packet.parse(tsp);
     if (!is_valid) {
         fprintf(stdout, "Invalid received packet.\n");
-        return;
+        return true;
+    }
+    // Ignore packets that aren't for the load generator:
+    if (packet.ip->getDstIpAddress() != pcpp::IPv4Address(std::string(LOAD_GEN_IP))) {
+      return false;
     }
 #ifdef LOG_ALL_PACKETS
     print_packet("RECV", &packet);
@@ -676,17 +683,16 @@ void load_gen_hook(switchpacket* tsp) {
         memcpy(new_tsp->dat, new_packet.getRawPacket()->getRawData(), ack_packet_size_bytes);
 
         // Verify and log the switchpacket
-        // TODO: For now we only work with port 0.
         parsed_packet_t sent_packet;
         if (!sent_packet.parse(new_tsp)) {
             fprintf(stdout, "Invalid sent packet.\n");
             free(new_tsp);
-            return;
+            return true;
         }
 #ifdef LOG_ALL_PACKETS
         print_packet("SEND", &sent_packet);
 #endif
-        send_with_priority(0, new_tsp);
+        send_with_priority(tsp->sender, new_tsp);
 
         // Check for nanoPU startup messages
         if (!start_message_received) {
@@ -703,6 +709,7 @@ void load_gen_hook(switchpacket* tsp) {
             }
         }
     }
+    return true;
 }
 
 // Figure out which load packets to generate.
