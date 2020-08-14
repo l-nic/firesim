@@ -628,6 +628,18 @@ void send_load_packet(uint16_t dst_context, uint64_t service_time, uint64_t sent
       new_payload_layer = pcpp::PayloadLayer((uint8_t*)&w_hdr, sizeof(w_hdr), false);
       msg_len += + new_payload_layer.getHeaderLen();
     }
+    else if (strcmp(load_type, "CHAINREP_READ") == 0) {
+      struct chainrep_r_hdr_t r_hdr;
+      r_hdr.flags = CHAINREP_FLAGS_OP_READ;
+      r_hdr.seq = 0;
+      r_hdr.node_cnt = 0;
+      r_hdr.client_ctx = 0;
+      r_hdr.client_ip = htobe32(CHAINREP_CLIENT_IP);
+      r_hdr.key[0] = htobe64(get_service_key(dst_context));
+      r_hdr.key[1] = htobe64(0x0);
+      new_payload_layer = pcpp::PayloadLayer((uint8_t*)&r_hdr, sizeof(r_hdr), false);
+      msg_len += + new_payload_layer.getHeaderLen();
+    }
 
     new_lnic_layer.getLnicHeader()->msg_len = htons(msg_len);
 
@@ -639,7 +651,8 @@ void send_load_packet(uint16_t dst_context, uint64_t service_time, uint64_t sent
     new_packet.addLayer(&new_lnic_layer);
     new_packet.addLayer(&new_app_layer);
     if (strcmp(load_type, "MICA") == 0 ||
-        strcmp(load_type, "CHAINREP") == 0
+        strcmp(load_type, "CHAINREP") == 0 ||
+        strcmp(load_type, "CHAINREP_READ") == 0
         )
       new_packet.addLayer(&new_payload_layer);
 
