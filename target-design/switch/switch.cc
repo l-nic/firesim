@@ -114,6 +114,31 @@ struct __attribute__((__packed__)) mica_hdr_t {
   uint64_t value[MICA_VALUE_SIZE_WORDS];
 };
 
+#define CHAINREP_FLAGS_FROM_TESTER    (1 << 7)
+#define CHAINREP_FLAGS_OP_READ        (1 << 6)
+#define CHAINREP_FLAGS_OP_WRITE       (1 << 5)
+#define CHAINREP_CHAIN_SIZE           3
+#define CHAINREP_VALUE_SIZE_WORDS     8
+#define CHAINREP_KEY_SIZE_WORDS       2
+struct __attribute__((__packed__)) chainrep_w_hdr_t {
+  uint8_t flags;
+  uint8_t seq;
+  uint8_t node_cnt;
+  uint8_t client_ctx;
+  uint32_t client_ip;
+  uint64_t nodes[2];
+  uint64_t key[CHAINREP_KEY_SIZE_WORDS];
+  uint64_t value[CHAINREP_VALUE_SIZE_WORDS];
+};
+struct __attribute__((__packed__)) chainrep_r_hdr_t {
+  uint8_t flags;
+  uint8_t seq;
+  uint8_t node_cnt;
+  uint8_t client_ctx;
+  uint32_t client_ip;
+  uint64_t key[CHAINREP_KEY_SIZE_WORDS];
+};
+
 
 // Comment this out to disable pkt trimming
 #define TRIM_PKTS
@@ -533,8 +558,8 @@ uint64_t get_service_time(int &dist) {
 
 }
 
-uint64_t get_service_key() {
-  return (*service_key_uniform_dist)(*dist_rand);
+uint64_t get_service_key(int context_id) {
+  return (max_service_key * context_id) + (*service_key_uniform_dist)(*dist_rand);
 }
 
 uint16_t get_next_tx_msg_id() {
@@ -570,7 +595,7 @@ void send_load_packet(uint16_t dst_context, uint64_t service_time, uint64_t sent
     if (strcmp(load_type, "MICA") == 0) {
       struct mica_hdr_t mica_hdr;
       uint16_t mica_hdr_size;
-      mica_hdr.key[0] = htobe64(get_service_key());
+      mica_hdr.key[0] = htobe64(get_service_key(dst_context));
       mica_hdr.key[1] = htobe64(0x0);
       if (tx_msg_id % 2 == 0) {
         mica_hdr.op_type = htobe64(MICA_W_TYPE);
@@ -584,6 +609,25 @@ void send_load_packet(uint16_t dst_context, uint64_t service_time, uint64_t sent
       new_payload_layer = pcpp::PayloadLayer((uint8_t*)&mica_hdr, mica_hdr_size, false);
       msg_len += + new_payload_layer.getHeaderLen();
     }
+    else if (strcmp(load_type, "CHAINREP") == 0) {
+      struct chainrep_w_hdr_t w_hdr;
+#define CHAINREP_CLIENT_IP 0x0a000001
+#define CHAINREP_NODE1_IP  0x0a000002
+      uint32_t node_ips[] = {CHAINREP_NODE1_IP+0, CHAINREP_NODE1_IP+1, CHAINREP_NODE1_IP+2};
+      uint8_t node_ctxs[] = {0, 0, 0};
+      w_hdr.flags = CHAINREP_FLAGS_OP_WRITE;
+      w_hdr.seq = 0;
+      w_hdr.node_cnt = CHAINREP_CHAIN_SIZE - 1;
+      w_hdr.client_ctx = 0;
+      w_hdr.client_ip = htobe32(CHAINREP_CLIENT_IP);
+      for (unsigned i = 1; i < CHAINREP_CHAIN_SIZE; i++)
+        w_hdr.nodes[i-1] = htobe64(((uint64_t)node_ctxs[i] << 32) | node_ips[i]);
+      w_hdr.key[0] = htobe64(get_service_key(dst_context));
+      w_hdr.key[1] = htobe64(0x0);
+      w_hdr.value[0] = htobe64(0x7);
+      new_payload_layer = pcpp::PayloadLayer((uint8_t*)&w_hdr, sizeof(w_hdr), false);
+      msg_len += + new_payload_layer.getHeaderLen();
+    }
 
     new_lnic_layer.getLnicHeader()->msg_len = htons(msg_len);
 
@@ -594,7 +638,9 @@ void send_load_packet(uint16_t dst_context, uint64_t service_time, uint64_t sent
     new_packet.addLayer(&new_ip_layer);
     new_packet.addLayer(&new_lnic_layer);
     new_packet.addLayer(&new_app_layer);
-    if (strcmp(load_type, "MICA") == 0)
+    if (strcmp(load_type, "MICA") == 0 ||
+        strcmp(load_type, "CHAINREP") == 0
+        )
       new_packet.addLayer(&new_payload_layer);
 
     new_packet.computeCalculateFields();
