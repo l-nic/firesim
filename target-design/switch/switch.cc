@@ -435,16 +435,16 @@ void print_packet(char* direction, parsed_packet_t* packet) {
 bool count_start_message() {
     global_start_message_count++;
     if (strcmp(test_type, "ONE_CONTEXT_FOUR_CORES") == 0) {
-        return global_start_message_count >= 4;
+        return global_start_message_count >= 4 * NUMPORTS;
     } else if (strcmp(test_type, "FOUR_CONTEXTS_FOUR_CORES") == 0) {
-        return global_start_message_count >= 4;
+        return global_start_message_count >= 4 * NUMPORTS;
     } else if (strcmp(test_type, "TWO_CONTEXTS_FOUR_SHARED_CORES") == 0) {
-        return global_start_message_count >= 8;
+        return global_start_message_count >= 8 * NUMPORTS;
     } else if ((strcmp(test_type, "DIF_PRIORITY_LNIC_DRIVEN") == 0) ||
               (strcmp(test_type, "DIF_PRIORITY_TIMER_DRIVEN") == 0) ||
               (strcmp(test_type, "HIGH_PRIORITY_C1_STALL") == 0) ||
               (strcmp(test_type, "LOW_PRIORITY_C1_STALL") == 0)) {
-        return global_start_message_count >= 2;
+        return global_start_message_count >= 2 * NUMPORTS;
     } else {
         fprintf(stdout, "Unknown test type: %s\n", test_type);
         exit(-1);
@@ -607,12 +607,12 @@ void send_load_packet(uint16_t dst_context, uint64_t service_time, uint64_t sent
         mica_hdr_size = sizeof(mica_hdr) - sizeof(mica_hdr.value);
       }
       new_payload_layer = pcpp::PayloadLayer((uint8_t*)&mica_hdr, mica_hdr_size, false);
-      msg_len += + new_payload_layer.getHeaderLen();
+      msg_len += new_payload_layer.getHeaderLen();
     }
     else if (strcmp(load_type, "CHAINREP") == 0) {
       struct chainrep_w_hdr_t w_hdr;
-#define CHAINREP_CLIENT_IP 0x0a000001
-#define CHAINREP_NODE1_IP  0x0a000002
+#define CHAINREP_CLIENT_IP 0x0a000002
+#define CHAINREP_NODE1_IP  0x0a000003
       uint32_t node_ips[] = {CHAINREP_NODE1_IP+0, CHAINREP_NODE1_IP+1, CHAINREP_NODE1_IP+2};
       uint8_t node_ctxs[] = {0, 0, 0};
       w_hdr.flags = CHAINREP_FLAGS_OP_WRITE;
@@ -626,7 +626,7 @@ void send_load_packet(uint16_t dst_context, uint64_t service_time, uint64_t sent
       w_hdr.key[1] = htobe64(0x0);
       w_hdr.value[0] = htobe64(0x7);
       new_payload_layer = pcpp::PayloadLayer((uint8_t*)&w_hdr, sizeof(w_hdr), false);
-      msg_len += + new_payload_layer.getHeaderLen();
+      msg_len += new_payload_layer.getHeaderLen();
     }
     else if (strcmp(load_type, "CHAINREP_READ") == 0) {
       struct chainrep_r_hdr_t r_hdr;
@@ -638,7 +638,7 @@ void send_load_packet(uint16_t dst_context, uint64_t service_time, uint64_t sent
       r_hdr.key[0] = htobe64(get_service_key(dst_context));
       r_hdr.key[1] = htobe64(0x0);
       new_payload_layer = pcpp::PayloadLayer((uint8_t*)&r_hdr, sizeof(r_hdr), false);
-      msg_len += + new_payload_layer.getHeaderLen();
+      msg_len += new_payload_layer.getHeaderLen();
     }
 
     new_lnic_layer.getLnicHeader()->msg_len = htons(msg_len);
