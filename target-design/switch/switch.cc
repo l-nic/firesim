@@ -111,6 +111,7 @@ uint64_t this_iter_cycles_start = 0;
 struct __attribute__((__packed__)) mica_hdr_t {
   uint64_t op_type;
   uint64_t key[MICA_KEY_SIZE_WORDS];
+  uint64_t key_hash;
   uint64_t value[MICA_VALUE_SIZE_WORDS];
 };
 
@@ -242,6 +243,7 @@ std::binomial_distribution<int>* service_select_dist;
 bool load_gen_hook(switchpacket* tsp);
 void generate_load_packets();
 void check_request_timeout();
+static inline uint64_t cityhash(const uint64_t *s);
 #endif
 
 // These are both set by command-line arguments. Don't change them here.
@@ -595,8 +597,12 @@ void send_load_packet(uint16_t dst_context, uint64_t service_time, uint64_t sent
     if (strcmp(load_type, "MICA") == 0) {
       struct mica_hdr_t mica_hdr;
       uint16_t mica_hdr_size;
-      mica_hdr.key[0] = htobe64(get_service_key(dst_context));
-      mica_hdr.key[1] = htobe64(0x0);
+      uint64_t host_endian_key[MICA_VALUE_SIZE_WORDS];
+      host_endian_key[0] = get_service_key(dst_context);
+      host_endian_key[1] = 0x0;
+      mica_hdr.key[0] = htobe64(host_endian_key[0]);
+      mica_hdr.key[1] = htobe64(host_endian_key[1]);
+      mica_hdr.key_hash = htobe64(cityhash(host_endian_key));
       if (tx_msg_id % 2 == 0) {
         mica_hdr.op_type = htobe64(MICA_W_TYPE);
         mica_hdr.value[0] = htobe64(0x7);
@@ -915,6 +921,56 @@ static void simplify_frac(int n, int d, int *nn, int *dd)
 
     *nn = n / a;
     *dd = d / a;
+}
+
+#ifdef WORDS_BIGENDIAN
+#define uint32_in_expected_order(x) (bswap_32(x))
+#define uint64_in_expected_order(x) (bswap_64(x))
+#else
+#define uint32_in_expected_order(x) (x)
+#define uint64_in_expected_order(x) (x)
+#endif
+
+static uint64_t UNALIGNED_LOAD64(const char *p) {
+  uint64_t result;
+  memcpy(&result, p, sizeof(result));
+  return result;
+}
+
+static uint64_t Fetch64(const char *p) {
+  return uint64_in_expected_order(UNALIGNED_LOAD64(p));
+}
+
+// Bitwise right rotate.  Normally this will compile to a single
+// instruction, especially if the shift is a manifest constant.
+static uint64_t Rotate(uint64_t val, int shift) {
+  // Avoid shifting by 64: doing so yields an undefined result.
+  return shift == 0 ? val : ((val >> shift) | (val << (64 - shift)));
+}
+
+static inline uint64_t HashLen16(uint64_t u, uint64_t v, uint64_t mul) {
+  // Murmur-inspired hashing.
+  uint64_t a = (u ^ v) * mul;
+  a ^= (a >> 47);
+  uint64_t b = (v ^ a) * mul;
+  b ^= (b >> 47);
+  b *= mul;
+  return b;
+}
+// This was extracted from the cityhash library. It's the codepath for hashing
+// 16 byte values.
+static inline uint64_t cityhash(const uint64_t *s) {
+  static const uint64_t k2 = 0x9ae16a3b2f90404fULL;
+  uint64_t mul = k2 + (MICA_KEY_SIZE_WORDS * 8) * 2;
+  //uint64_t a = s[0] + k2;
+  //uint64_t b = s[1];
+  //uint64_t c = rotate(b, 37) * mul + a;
+  //uint64_t d = (rotate(a, 25) + b) * mul;
+  uint64_t a = Fetch64((char*)s) + k2;
+  uint64_t b = Fetch64(((char*)s) + (MICA_KEY_SIZE_WORDS * 8) - 8);
+  uint64_t c = Rotate(b, 37) * mul + a;
+  uint64_t d = (Rotate(a, 25) + b) * mul;
+  return HashLen16(c, d, mul);
 }
 
 int main (int argc, char *argv[]) {
