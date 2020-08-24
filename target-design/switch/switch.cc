@@ -129,6 +129,7 @@ struct __attribute__((__packed__)) chainrep_w_hdr_t {
   uint32_t client_ip;
   uint64_t nodes[2];
   uint64_t key[CHAINREP_KEY_SIZE_WORDS];
+  uint64_t key_hash;
   uint64_t value[CHAINREP_VALUE_SIZE_WORDS];
 };
 struct __attribute__((__packed__)) chainrep_r_hdr_t {
@@ -479,6 +480,15 @@ void log_packet_response_time(parsed_packet_t* packet) {
     uint64_t delta_time = (recv_time > sent_time) ? (recv_time - sent_time) : 0;
     fprintf(stdout, "&&CSV&&ResponseTimes,%ld,%ld,%ld,%ld,%ld,%d,%f,%ld\n",
       service_time, delta_time, sent_time, recv_time, iter_time, src_context, get_avg_service_time(), request_rate_lambda_inverse);
+    // Verify MICA READ response:
+    //uint16_t msg_len = ntohs(packet->lnic->getLnicHeader()->msg_len);
+    //if (msg_len > 60) {
+    //  uint64_t *msg_value = (uint64_t *)packet->app->getLayerPayload();
+    //  uint64_t w0 = be64toh(msg_value[0]);
+    //  uint64_t w1 = be64toh(msg_value[1]);
+    //  uint64_t w2 = be64toh(msg_value[2]);
+    //  fprintf(stdout, "GOT VALUE: 0x%lx 0x%lx 0x%lx\n", w0, w1, w2);
+    //}
 }
 
 void update_load() {
@@ -605,7 +615,9 @@ void send_load_packet(uint16_t dst_context, uint64_t service_time, uint64_t sent
       mica_hdr.key_hash = htobe64(cityhash(host_endian_key));
       if (tx_msg_id % 2 == 0) {
         mica_hdr.op_type = htobe64(MICA_W_TYPE);
-        mica_hdr.value[0] = htobe64(0x7);
+        mica_hdr.value[0] = htobe64(host_endian_key[0]);
+        mica_hdr.value[1] = htobe64(host_endian_key[0]+1);
+        mica_hdr.value[2] = htobe64(host_endian_key[0]+2);
         mica_hdr_size = sizeof(mica_hdr);
       }
       else {
@@ -628,9 +640,15 @@ void send_load_packet(uint16_t dst_context, uint64_t service_time, uint64_t sent
       w_hdr.client_ip = htobe32(CHAINREP_CLIENT_IP);
       for (unsigned i = 1; i < CHAINREP_CHAIN_SIZE; i++)
         w_hdr.nodes[i-1] = htobe64(((uint64_t)node_ctxs[i] << 32) | node_ips[i]);
-      w_hdr.key[0] = htobe64(get_service_key(dst_context));
-      w_hdr.key[1] = htobe64(0x0);
-      w_hdr.value[0] = htobe64(0x7);
+      uint64_t host_endian_key[MICA_VALUE_SIZE_WORDS];
+      host_endian_key[0] = get_service_key(dst_context);
+      host_endian_key[1] = 0x0;
+      w_hdr.key[0] = htobe64(host_endian_key[0]);
+      w_hdr.key[1] = htobe64(host_endian_key[1]);
+      w_hdr.key_hash = htobe64(cityhash(host_endian_key));
+      w_hdr.value[0] = htobe64(host_endian_key[0]);
+      w_hdr.value[1] = htobe64(host_endian_key[0]+1);
+      w_hdr.value[2] = htobe64(host_endian_key[0]+2);
       new_payload_layer = pcpp::PayloadLayer((uint8_t*)&w_hdr, sizeof(w_hdr), false);
       msg_len += new_payload_layer.getHeaderLen();
     }
