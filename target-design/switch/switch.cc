@@ -631,6 +631,9 @@ void send_load_packet(uint16_t dst_context, uint64_t service_time, uint64_t sent
       struct chainrep_w_hdr_t w_hdr;
 #define CHAINREP_CLIENT_IP 0x0a000002
 #define CHAINREP_NODE1_IP  0x0a000003
+// send requests directly to the chain, without the proxy client:
+//#define CHAINREP_CLIENT_IP 0x0a000001
+//#define CHAINREP_NODE1_IP  0x0a000002
       uint32_t node_ips[] = {CHAINREP_NODE1_IP+0, CHAINREP_NODE1_IP+1, CHAINREP_NODE1_IP+2};
       uint8_t node_ctxs[] = {0, 0, 0};
       w_hdr.flags = CHAINREP_FLAGS_OP_WRITE;
