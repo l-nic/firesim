@@ -104,6 +104,44 @@ uint64_t this_iter_cycles_start = 0;
 #define LNIC_PACKET_CHOPPED_SIZE   72 // Bytes, the minimum L-NIC packet size
 #define LNIC_HEADER_SIZE           30
 
+#define MICA_R_TYPE 1
+#define MICA_W_TYPE 2
+#define MICA_VALUE_SIZE_WORDS 64
+#define MICA_KEY_SIZE_WORDS   2
+struct __attribute__((__packed__)) mica_hdr_t {
+  uint64_t op_type;
+  uint64_t key[MICA_KEY_SIZE_WORDS];
+  uint64_t key_hash;
+  uint64_t value[MICA_VALUE_SIZE_WORDS];
+};
+
+#define CHAINREP_FLAGS_FROM_TESTER    (1 << 7)
+#define CHAINREP_FLAGS_OP_READ        (1 << 6)
+#define CHAINREP_FLAGS_OP_WRITE       (1 << 5)
+#define CHAINREP_CHAIN_SIZE           3
+#define CHAINREP_VALUE_SIZE_WORDS     8
+#define CHAINREP_KEY_SIZE_WORDS       2
+struct __attribute__((__packed__)) chainrep_w_hdr_t {
+  uint8_t flags;
+  uint8_t seq;
+  uint8_t node_cnt;
+  uint8_t client_ctx;
+  uint32_t client_ip;
+  uint64_t nodes[2];
+  uint64_t key[CHAINREP_KEY_SIZE_WORDS];
+  uint64_t key_hash;
+  uint64_t value[CHAINREP_VALUE_SIZE_WORDS];
+};
+struct __attribute__((__packed__)) chainrep_r_hdr_t {
+  uint8_t flags;
+  uint8_t seq;
+  uint8_t node_cnt;
+  uint8_t client_ctx;
+  uint32_t client_ip;
+  uint64_t key[CHAINREP_KEY_SIZE_WORDS];
+};
+
+
 // Comment this out to disable pkt trimming
 #define TRIM_PKTS
 
@@ -119,6 +157,7 @@ uint64_t this_iter_cycles_start = 0;
 #ifdef USE_LOAD_GEN
 #include "LnicLayer.h"
 #include "AppLayer.h"
+#include "PayloadLayer.h"
 class parsed_packet_t {
  private:
     pcpp::Packet* pcpp_packet;
@@ -197,13 +236,15 @@ uint64_t global_start_message_count = 0;
 std::exponential_distribution<double>* gen_dist;
 std::default_random_engine* gen_rand;
 std::exponential_distribution<double>* service_exp_dist;
+std::uniform_int_distribution<>* service_key_uniform_dist;
 std::default_random_engine* dist_rand;
 std::normal_distribution<double>* service_normal_high;
 std::normal_distribution<double>* service_normal_low;
 std::binomial_distribution<int>* service_select_dist;
-void load_gen_hook(switchpacket* tsp);
+bool load_gen_hook(switchpacket* tsp);
 void generate_load_packets();
 void check_request_timeout();
+static inline uint64_t cityhash(const uint64_t *s);
 #endif
 
 // These are both set by command-line arguments. Don't change them here.
@@ -328,9 +369,10 @@ while (!pqueue.empty()) {
 
 // If this is a load generator, we need to do something completely different with all incoming packets.
 #ifdef USE_LOAD_GEN
-    load_gen_hook(tsp);
-    free(tsp);
-    continue;
+    if (load_gen_hook(tsp)) {
+      free(tsp);
+      continue;
+    }
 #endif
 
     int flit_offset_doublebytes = (ETHER_HEADER_SIZE + IP_DST_FIELD_OFFSET + IP_SUBNET_OFFSET) / sizeof(uint16_t);
@@ -396,16 +438,16 @@ void print_packet(char* direction, parsed_packet_t* packet) {
 bool count_start_message() {
     global_start_message_count++;
     if (strcmp(test_type, "ONE_CONTEXT_FOUR_CORES") == 0) {
-        return global_start_message_count >= 4;
+        return global_start_message_count >= 4 * NUMPORTS;
     } else if (strcmp(test_type, "FOUR_CONTEXTS_FOUR_CORES") == 0) {
-        return global_start_message_count >= 4;
+        return global_start_message_count >= 4 * NUMPORTS;
     } else if (strcmp(test_type, "TWO_CONTEXTS_FOUR_SHARED_CORES") == 0) {
-        return global_start_message_count >= 8;
+        return global_start_message_count >= 8 * NUMPORTS;
     } else if ((strcmp(test_type, "DIF_PRIORITY_LNIC_DRIVEN") == 0) ||
               (strcmp(test_type, "DIF_PRIORITY_TIMER_DRIVEN") == 0) ||
               (strcmp(test_type, "HIGH_PRIORITY_C1_STALL") == 0) ||
               (strcmp(test_type, "LOW_PRIORITY_C1_STALL") == 0)) {
-        return global_start_message_count >= 2;
+        return global_start_message_count >= 2 * NUMPORTS;
     } else {
         fprintf(stdout, "Unknown test type: %s\n", test_type);
         exit(-1);
@@ -438,6 +480,15 @@ void log_packet_response_time(parsed_packet_t* packet) {
     uint64_t delta_time = (recv_time > sent_time) ? (recv_time - sent_time) : 0;
     fprintf(stdout, "&&CSV&&ResponseTimes,%ld,%ld,%ld,%ld,%ld,%d,%f,%ld\n",
       service_time, delta_time, sent_time, recv_time, iter_time, src_context, get_avg_service_time(), request_rate_lambda_inverse);
+    // Verify MICA READ response:
+    //uint16_t msg_len = ntohs(packet->lnic->getLnicHeader()->msg_len);
+    //if (msg_len > 60) {
+    //  uint64_t *msg_value = (uint64_t *)packet->app->getLayerPayload();
+    //  uint64_t w0 = be64toh(msg_value[0]);
+    //  uint64_t w1 = be64toh(msg_value[1]);
+    //  uint64_t w2 = be64toh(msg_value[2]);
+    //  fprintf(stdout, "GOT VALUE: 0x%lx 0x%lx 0x%lx\n", w0, w1, w2);
+    //}
 }
 
 void update_load() {
@@ -519,6 +570,10 @@ uint64_t get_service_time(int &dist) {
 
 }
 
+uint64_t get_service_key(int context_id) {
+  return (max_service_key * context_id) + (*service_key_uniform_dist)(*dist_rand);
+}
+
 uint16_t get_next_tx_msg_id() {
     uint16_t to_return = global_tx_msg_id;
     global_tx_msg_id++;
@@ -535,23 +590,99 @@ void send_load_packet(uint16_t dst_context, uint64_t service_time, uint64_t sent
     new_ip_layer.getIPv4Header()->ipId = htons(1);
     new_ip_layer.getIPv4Header()->timeToLive = 64;
     new_ip_layer.getIPv4Header()->protocol = 153; // Protocol code for LNIC
-    uint64_t data_packet_size_bytes = ETHER_HEADER_SIZE + IP_HEADER_SIZE + LNIC_HEADER_SIZE + APP_HEADER_SIZE;
+
+    uint16_t tx_msg_id = get_next_tx_msg_id();
 
     // Build the new lnic and application packet layers
     pcpp::LnicLayer new_lnic_layer(0, 0, 0, 0, 0, 0, 0, 0, 0);
     new_lnic_layer.getLnicHeader()->flags = (uint8_t)LNIC_DATA_FLAG_MASK;
-    new_lnic_layer.getLnicHeader()->msg_len = htons(16);
     new_lnic_layer.getLnicHeader()->src_context = htons(0);
     new_lnic_layer.getLnicHeader()->dst_context = htons(dst_context);
-    new_lnic_layer.getLnicHeader()->tx_msg_id = htons(get_next_tx_msg_id());
+    new_lnic_layer.getLnicHeader()->tx_msg_id = htons(tx_msg_id);
     pcpp::AppLayer new_app_layer(service_time, sent_time);
 
+    uint16_t msg_len = new_app_layer.getHeaderLen();
+    pcpp::PayloadLayer new_payload_layer(0, 0, false);
+
+    if (strcmp(load_type, "MICA") == 0) {
+      struct mica_hdr_t mica_hdr;
+      uint16_t mica_hdr_size;
+      uint64_t host_endian_key[MICA_VALUE_SIZE_WORDS];
+      host_endian_key[0] = get_service_key(dst_context);
+      host_endian_key[1] = 0x0;
+      mica_hdr.key[0] = htobe64(host_endian_key[0]);
+      mica_hdr.key[1] = htobe64(host_endian_key[1]);
+      mica_hdr.key_hash = htobe64(cityhash(host_endian_key));
+      if (tx_msg_id % 2 == 0) {
+        mica_hdr.op_type = htobe64(MICA_W_TYPE);
+        mica_hdr.value[0] = htobe64(host_endian_key[0]);
+        mica_hdr.value[1] = htobe64(host_endian_key[0]+1);
+        mica_hdr.value[2] = htobe64(host_endian_key[0]+2);
+        mica_hdr_size = sizeof(mica_hdr);
+      }
+      else {
+        mica_hdr.op_type = htobe64(MICA_R_TYPE);
+        mica_hdr_size = sizeof(mica_hdr) - sizeof(mica_hdr.value);
+      }
+      new_payload_layer = pcpp::PayloadLayer((uint8_t*)&mica_hdr, mica_hdr_size, false);
+      msg_len += new_payload_layer.getHeaderLen();
+    }
+    else if (strcmp(load_type, "CHAINREP") == 0) {
+      struct chainrep_w_hdr_t w_hdr;
+#define CHAINREP_CLIENT_IP 0x0a000002
+#define CHAINREP_NODE1_IP  0x0a000003
+// send requests directly to the chain, without the proxy client:
+//#define CHAINREP_CLIENT_IP 0x0a000001
+//#define CHAINREP_NODE1_IP  0x0a000002
+      uint32_t node_ips[] = {CHAINREP_NODE1_IP+0, CHAINREP_NODE1_IP+1, CHAINREP_NODE1_IP+2};
+      uint8_t node_ctxs[] = {0, 0, 0};
+      w_hdr.flags = CHAINREP_FLAGS_OP_WRITE;
+      w_hdr.seq = 0;
+      w_hdr.node_cnt = CHAINREP_CHAIN_SIZE - 1;
+      w_hdr.client_ctx = 0;
+      w_hdr.client_ip = htobe32(CHAINREP_CLIENT_IP);
+      for (unsigned i = 1; i < CHAINREP_CHAIN_SIZE; i++)
+        w_hdr.nodes[i-1] = htobe64(((uint64_t)node_ctxs[i] << 32) | node_ips[i]);
+      uint64_t host_endian_key[MICA_VALUE_SIZE_WORDS];
+      host_endian_key[0] = get_service_key(dst_context);
+      host_endian_key[1] = 0x0;
+      w_hdr.key[0] = htobe64(host_endian_key[0]);
+      w_hdr.key[1] = htobe64(host_endian_key[1]);
+      w_hdr.key_hash = htobe64(cityhash(host_endian_key));
+      w_hdr.value[0] = htobe64(host_endian_key[0]);
+      w_hdr.value[1] = htobe64(host_endian_key[0]+1);
+      w_hdr.value[2] = htobe64(host_endian_key[0]+2);
+      new_payload_layer = pcpp::PayloadLayer((uint8_t*)&w_hdr, sizeof(w_hdr), false);
+      msg_len += new_payload_layer.getHeaderLen();
+    }
+    else if (strcmp(load_type, "CHAINREP_READ") == 0) {
+      struct chainrep_r_hdr_t r_hdr;
+      r_hdr.flags = CHAINREP_FLAGS_OP_READ;
+      r_hdr.seq = 0;
+      r_hdr.node_cnt = 0;
+      r_hdr.client_ctx = 0;
+      r_hdr.client_ip = htobe32(CHAINREP_CLIENT_IP);
+      r_hdr.key[0] = htobe64(get_service_key(dst_context));
+      r_hdr.key[1] = htobe64(0x0);
+      new_payload_layer = pcpp::PayloadLayer((uint8_t*)&r_hdr, sizeof(r_hdr), false);
+      msg_len += new_payload_layer.getHeaderLen();
+    }
+
+    new_lnic_layer.getLnicHeader()->msg_len = htons(msg_len);
+
     // Join the layers into a new packet
+    uint64_t data_packet_size_bytes = ETHER_HEADER_SIZE + IP_HEADER_SIZE + LNIC_HEADER_SIZE + msg_len;
     pcpp::Packet new_packet(data_packet_size_bytes);
     new_packet.addLayer(&new_eth_layer);
     new_packet.addLayer(&new_ip_layer);
     new_packet.addLayer(&new_lnic_layer);
     new_packet.addLayer(&new_app_layer);
+    if (strcmp(load_type, "MICA") == 0 ||
+        strcmp(load_type, "CHAINREP") == 0 ||
+        strcmp(load_type, "CHAINREP_READ") == 0
+        )
+      new_packet.addLayer(&new_payload_layer);
+
     new_packet.computeCalculateFields();
 
     // Convert the packet to a switchpacket
@@ -584,13 +715,19 @@ void send_load_packet(uint16_t dst_context, uint64_t service_time, uint64_t sent
     }
 }
 
-void load_gen_hook(switchpacket* tsp) {
+// Returns true if this packet is for the load generator, otherwise returns
+// false, indicating that the switch should process the packet as usual
+bool load_gen_hook(switchpacket* tsp) {
     // Parse and log the incoming packet
     parsed_packet_t packet;
     bool is_valid = packet.parse(tsp);
     if (!is_valid) {
         fprintf(stdout, "Invalid received packet.\n");
-        return;
+        return true;
+    }
+    // Ignore packets that aren't for the load generator:
+    if (packet.ip->getDstIpAddress() != pcpp::IPv4Address(std::string(LOAD_GEN_IP))) {
+      return false;
     }
 #ifdef LOG_ALL_PACKETS
     print_packet("RECV", &packet);
@@ -632,17 +769,16 @@ void load_gen_hook(switchpacket* tsp) {
         memcpy(new_tsp->dat, new_packet.getRawPacket()->getRawData(), ack_packet_size_bytes);
 
         // Verify and log the switchpacket
-        // TODO: For now we only work with port 0.
         parsed_packet_t sent_packet;
         if (!sent_packet.parse(new_tsp)) {
             fprintf(stdout, "Invalid sent packet.\n");
             free(new_tsp);
-            return;
+            return true;
         }
 #ifdef LOG_ALL_PACKETS
         print_packet("SEND", &sent_packet);
 #endif
-        send_with_priority(0, new_tsp);
+        send_with_priority(tsp->sender, new_tsp);
 
         // Check for nanoPU startup messages
         if (!start_message_received) {
@@ -659,6 +795,7 @@ void load_gen_hook(switchpacket* tsp) {
             }
         }
     }
+    return true;
 }
 
 // Figure out which load packets to generate.
@@ -733,7 +870,7 @@ void send_with_priority(uint16_t port, switchpacket* tsp) {
     fprintf(stdout, "%ld: IP(src=%s, dst=%s), LNIC(flags=%s, msg_len=%d, src_context=%d, dst_context=%d), packet_len=%d, port=%d\n",
                      tsp->timestamp, ip_src_addr.c_str(), ip_dst_addr.c_str(), flags_str.c_str(), lnic_msg_len_bytes,
                      lnic_src_context, lnic_dst_context, packet_size_bytes, port);
-#endif LOG_ALL_PACKETS
+#endif // LOG_ALL_PACKETS
 
     if (is_data && !is_chop) {
         // Regular data, send to low priority queue or chop and send to high priority
@@ -807,6 +944,56 @@ static void simplify_frac(int n, int d, int *nn, int *dd)
     *dd = d / a;
 }
 
+#ifdef WORDS_BIGENDIAN
+#define uint32_in_expected_order(x) (bswap_32(x))
+#define uint64_in_expected_order(x) (bswap_64(x))
+#else
+#define uint32_in_expected_order(x) (x)
+#define uint64_in_expected_order(x) (x)
+#endif
+
+static uint64_t UNALIGNED_LOAD64(const char *p) {
+  uint64_t result;
+  memcpy(&result, p, sizeof(result));
+  return result;
+}
+
+static uint64_t Fetch64(const char *p) {
+  return uint64_in_expected_order(UNALIGNED_LOAD64(p));
+}
+
+// Bitwise right rotate.  Normally this will compile to a single
+// instruction, especially if the shift is a manifest constant.
+static uint64_t Rotate(uint64_t val, int shift) {
+  // Avoid shifting by 64: doing so yields an undefined result.
+  return shift == 0 ? val : ((val >> shift) | (val << (64 - shift)));
+}
+
+static inline uint64_t HashLen16(uint64_t u, uint64_t v, uint64_t mul) {
+  // Murmur-inspired hashing.
+  uint64_t a = (u ^ v) * mul;
+  a ^= (a >> 47);
+  uint64_t b = (v ^ a) * mul;
+  b ^= (b >> 47);
+  b *= mul;
+  return b;
+}
+// This was extracted from the cityhash library. It's the codepath for hashing
+// 16 byte values.
+static inline uint64_t cityhash(const uint64_t *s) {
+  static const uint64_t k2 = 0x9ae16a3b2f90404fULL;
+  uint64_t mul = k2 + (MICA_KEY_SIZE_WORDS * 8) * 2;
+  //uint64_t a = s[0] + k2;
+  //uint64_t b = s[1];
+  //uint64_t c = rotate(b, 37) * mul + a;
+  //uint64_t d = (rotate(a, 25) + b) * mul;
+  uint64_t a = Fetch64((char*)s) + k2;
+  uint64_t b = Fetch64(((char*)s) + (MICA_KEY_SIZE_WORDS * 8) - 8);
+  uint64_t c = Rotate(b, 37) * mul + a;
+  uint64_t d = (Rotate(a, 25) + b) * mul;
+  return HashLen16(c, d, mul);
+}
+
 int main (int argc, char *argv[]) {
     int bandwidth;
 
@@ -832,6 +1019,7 @@ int main (int argc, char *argv[]) {
     gen_rand = new std::default_random_engine;
     gen_dist = new std::exponential_distribution<double>(request_rate_lambda);
     dist_rand = new std::default_random_engine;
+    service_key_uniform_dist = new std::uniform_int_distribution<>(min_service_key, max_service_key);
     service_exp_dist = new std::exponential_distribution<double>(exp_dist_decay_const);
     service_normal_high = new std::normal_distribution<double>(bimodal_dist_high_mean, bimodal_dist_high_stdev);
     service_normal_low = new std::normal_distribution<double>(bimodal_dist_low_mean, bimodal_dist_low_stdev);

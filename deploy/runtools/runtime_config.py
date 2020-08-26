@@ -237,6 +237,7 @@ class InnerRuntimeConfiguration:
     class LoadGenStats:
         use_load_gen = None
         test_type = None
+        load_type = None
         service_dist_type = None
         request_dist_type = None
         num_requests = None
@@ -245,6 +246,8 @@ class InnerRuntimeConfiguration:
         request_rate_lambda_inverse_dec = None
         min_service_time = None
         max_service_time = None
+        min_service_key = None
+        max_service_key = None
         exp_dist_scale_factor = None
         exp_dist_decay_const = None
         bimodal_dist_high_mean = None
@@ -310,6 +313,7 @@ class InnerRuntimeConfiguration:
             self.load_gen_stats = self.LoadGenStats()
             self.load_gen_stats.use_load_gen = runtime_dict['load_gen']['use_load_gen'] == "yes"
             self.load_gen_stats.test_type = runtime_dict['load_gen']['test_type']
+            self.load_gen_stats.load_type = runtime_dict['load_gen']['load_type'] if 'load_type' in runtime_dict['load_gen'] else 'DEFAULT'
             self.load_gen_stats.service_dist_type = runtime_dict['load_gen']['service_dist_type']
             self.load_gen_stats.request_dist_type = runtime_dict['load_gen']['request_dist_type']
             self.load_gen_stats.num_requests = runtime_dict['load_gen']['num_requests']
@@ -318,6 +322,8 @@ class InnerRuntimeConfiguration:
             self.load_gen_stats.request_rate_lambda_inverse_dec = runtime_dict['load_gen']['request_rate_lambda_inverse_dec']
             self.load_gen_stats.min_service_time = runtime_dict['load_gen']['min_service_time']
             self.load_gen_stats.max_service_time = runtime_dict['load_gen']['max_service_time']
+            self.load_gen_stats.min_service_key = runtime_dict['load_gen']['min_service_key'] if 'min_service_key' in runtime_dict['load_gen'] else 0
+            self.load_gen_stats.max_service_key = runtime_dict['load_gen']['max_service_key'] if 'max_service_key' in runtime_dict['load_gen'] else 0
             self.load_gen_stats.exp_dist_scale_factor = runtime_dict['load_gen']['exp_dist_scale_factor']
             self.load_gen_stats.exp_dist_decay_const = runtime_dict['load_gen']['exp_dist_decay_const']
             self.load_gen_stats.bimodal_dist_high_mean = runtime_dict['load_gen']['bimodal_dist_high_mean']
