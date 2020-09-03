@@ -5,6 +5,8 @@ import logging
 from runtools.switch_model_config import AbstractSwitchToSwitchConfig
 from util.streamlogger import StreamLogger
 from fabric.api import *
+from utils import IpAddress
+import socket, struct
 
 rootLogger = logging.getLogger()
 
@@ -159,7 +161,7 @@ class FireSimServerNode(FireSimNode):
     def __init__(self, server_hardware_config=None, server_link_latency=None,
                  server_bw_max=None, server_profile_interval=None,
                  trace_enable=None, trace_select=None, trace_start=None, trace_end=None, trace_output_format=None, autocounter_readrate=None,
-                 zerooutdram=None, timeout_cycles=None, rtt_pkts=None, load_gen_stats=None):
+                 zerooutdram=None, timeout_cycles=None, rtt_pkts=None, load_gen_stats=None, raft_cluster=None):
         super(FireSimServerNode, self).__init__()
         self.server_hardware_config = server_hardware_config
         self.server_link_latency = server_link_latency
@@ -175,6 +177,7 @@ class FireSimServerNode(FireSimNode):
         self.timeout_cycles = timeout_cycles
         self.rtt_pkts = rtt_pkts
         self.load_gen_stats = load_gen_stats
+        self.raft_cluster = raft_cluster
         self.job = None
         self.server_id_internal = FireSimServerNode.SERVERS_CREATED
         FireSimServerNode.SERVERS_CREATED += 1
@@ -391,9 +394,20 @@ class FireSimServerNode(FireSimNode):
     def get_load_gen_progargs(self):
         return [self.load_gen_stats.test_type, str(self.load_gen_stats.c1_stall_factor), str(self.load_gen_stats.c1_stall_freq)]
     
+    def get_raft_cluster_progargs(self):
+        base_addr = IpAddress.lnic_ip_prefix + IpAddress.orig_ip_alloc
+        num_servers = int(self.raft_cluster.num_servers)
+        cluster_servers = []
+        for i in range(num_servers):
+            cluster_servers.append(str(socket.inet_ntoa(struct.pack('!L', base_addr + i))))
+        print cluster_servers
+        return cluster_servers
+    
     def get_progargs(self):
         if self.load_gen_stats and self.load_gen_stats.use_load_gen:
             return [self.get_mac_address(), self.get_ip_address()] + self.get_load_gen_progargs()
+        elif self.raft_cluster and self.raft_cluster.use_raft_cluster:
+            return [self.get_mac_address(), self.get_ip_address()] + self.get_raft_cluster_progargs()
         else:
             return [self.get_mac_address(), self.get_ip_address()]
 

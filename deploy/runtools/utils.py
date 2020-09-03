@@ -63,6 +63,7 @@ class IpAddress():
     IP Addresses will start at 10.0.0.1
     """
     next_ip_alloc = 2
+    orig_ip_alloc = 2
     lnic_ip_prefix = 0x0A000000
 
     def __init__(self):

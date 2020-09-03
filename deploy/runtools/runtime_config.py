@@ -259,6 +259,10 @@ class InnerRuntimeConfiguration:
         c1_stall_factor = None
         c1_stall_freq = None
         rtt_pkts = None
+    
+    class RaftCluster:
+        use_raft_cluster = None
+        num_servers = None
 
     def __init__(self, runtimeconfigfile, configoverridedata):
         runtime_configfile = ConfigParser.ConfigParser(allow_no_value=True)
@@ -338,6 +342,14 @@ class InnerRuntimeConfiguration:
         else:
             self.load_gen_stats = self.LoadGenStats()
             self.load_gen_stats.use_load_gen = False
+        
+        if 'raft_cluster' in runtime_dict:
+            self.raft_cluster = self.RaftCluster()
+            self.raft_cluster.use_raft_cluster = runtime_dict['raft_cluster']['use_raft_cluster'] == "yes"
+            self.raft_cluster.num_servers = runtime_dict['raft_cluster']['num_servers']
+        else:
+            self.raft_cluster = self.RaftCluster()
+            self.raft_cluster.use_raft_cluster = False
         # Default values
         self.trace_enable = False
         self.trace_select = "0"
@@ -419,7 +431,8 @@ class RuntimeConfig:
             self.innerconf.wait_for_all_sims,
             self.innerconf.default_timeout_cycles,
             self.innerconf.default_rtt_pkts,
-            self.innerconf.load_gen_stats)
+            self.innerconf.load_gen_stats,
+            self.innerconf.raft_cluster)
 
     def launch_run_farm(self):
         """ directly called by top-level launchrunfarm command. """
