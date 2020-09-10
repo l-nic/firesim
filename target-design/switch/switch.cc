@@ -154,8 +154,8 @@ struct __attribute__((packed)) raft_req_header_t {
 struct __attribute__((packed)) raft_resp_t {
     uint8_t padding[6];
     uint16_t msg_id;
-    uint32_t resp_type;
     uint32_t leader_ip;
+    uint32_t resp_type;
 };
 
 
@@ -266,6 +266,7 @@ static inline uint64_t cityhash(const uint64_t *s);
 bool global_raft_leader_found = false;
 bool is_raft = false;
 uint32_t global_raft_leader_ip = 0;
+uint32_t raft_client_ip = 0x0a000005;
 #endif
 
 // These are both set by command-line arguments. Don't change them here.
@@ -542,7 +543,7 @@ void find_raft_leader(parsed_packet_t* packet) {
     }
     raft_resp_t* resp_msg = (raft_resp_t*)packet->app->getLayerPayload();
     uint64_t* msg_words = (uint64_t*)resp_msg;
-    fprintf(stdout, "%#lx, %#lx, %#lx, %#lx\n", msg_words[0], msg_words[1], msg_words[2], msg_words[3]);
+    fprintf(stdout, "%#lx, %#lx, %#lx, %#lx\n", msg_words[0], msg_words[1]);
     if (be16toh(resp_msg->msg_id) != 5) {
         fprintf(stdout, "While finding leader, unknown msg type id %d\n", be16toh(resp_msg->msg_id));
         // Dump anything other than ReqType::kClientReqResponse messages
@@ -553,10 +554,10 @@ void find_raft_leader(parsed_packet_t* packet) {
     if (resp_type == 0) {
         // Raft leader has been found
         global_raft_leader_found = true;
-        global_raft_leader_ip = be64toh(resp_msg->leader_ip);
+        global_raft_leader_ip = resp_msg->leader_ip;
     } else if (resp_type == 1) {
         // Leader redirection
-        global_raft_leader_ip = be64toh(resp_msg->leader_ip);
+        global_raft_leader_ip = resp_msg->leader_ip;
     } else if (resp_type == 2) {
         // Unknown leader, do nothing
         return;
@@ -661,9 +662,6 @@ void send_load_packet(uint16_t dst_context, uint64_t service_time, uint64_t sent
     // Build the new ethernet/ip packet layers
     pcpp::EthLayer new_eth_layer(pcpp::MacAddress(LOAD_GEN_MAC), pcpp::MacAddress(NIC_MAC));
     pcpp::IPv4Layer new_ip_layer(pcpp::IPv4Address(std::string(LOAD_GEN_IP)), pcpp::IPv4Address(std::string(NIC_IP)));
-    if (is_raft) {
-        new_ip_layer.getIPv4Header()->ipDst = global_raft_leader_ip; 
-    }
     new_ip_layer.getIPv4Header()->ipId = htons(1);
     new_ip_layer.getIPv4Header()->timeToLive = 64;
     new_ip_layer.getIPv4Header()->protocol = 153; // Protocol code for LNIC
@@ -677,6 +675,12 @@ void send_load_packet(uint16_t dst_context, uint64_t service_time, uint64_t sent
     new_lnic_layer.getLnicHeader()->dst_context = htons(dst_context);
     new_lnic_layer.getLnicHeader()->tx_msg_id = htons(tx_msg_id);
     pcpp::AppLayer new_app_layer(service_time, sent_time);
+
+    if (is_raft) {
+        new_ip_layer.getIPv4Header()->ipDst = be32toh(raft_client_ip);
+        uint64_t service_time_ip = (uint64_t)global_raft_leader_ip << 32;
+        new_app_layer.getAppHeader()->service_time = service_time_ip;
+    }
 
     uint16_t msg_len = new_app_layer.getHeaderLen();
     pcpp::PayloadLayer new_payload_layer(0, 0, false);
