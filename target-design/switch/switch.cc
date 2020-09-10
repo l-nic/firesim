@@ -141,6 +141,23 @@ struct __attribute__((__packed__)) chainrep_r_hdr_t {
   uint64_t key[CHAINREP_KEY_SIZE_WORDS];
 };
 
+const uint64_t kAppKeySize = 16; // 16B keys
+const uint64_t kAppValueSize = 64; // 64B values
+struct __attribute__((packed)) raft_req_header_t {
+    uint8_t padding[6];
+    uint16_t msg_id;
+    // TODO: This should potentially include the hash as well.
+    uint64_t key[kAppKeySize / sizeof(uint64_t)];
+    uint64_t value[kAppValueSize / sizeof(uint64_t)];
+};
+
+struct __attribute__((packed)) raft_resp_t {
+    uint8_t padding[6];
+    uint16_t msg_id;
+    uint32_t resp_type;
+    uint32_t leader_ip;
+};
+
 
 // Comment this out to disable pkt trimming
 #define TRIM_PKTS
@@ -220,7 +237,8 @@ class parsed_packet_t {
 #define LOAD_GEN_MAC "08:55:66:77:88:08"
 #define LOAD_GEN_IP "10.0.0.1"
 #define NIC_MAC "00:26:E1:00:00:00"
-#define NIC_IP "10.0.0.2"
+#define NIC_IP "10.0.0.3"
+#define NIC_IP_BIGENDIAN 0x0a000003
 #define MAX_TX_MSG_ID 127
 #define APP_HEADER_SIZE 16
 uint64_t tx_request_count = 0;
@@ -245,6 +263,9 @@ bool load_gen_hook(switchpacket* tsp);
 void generate_load_packets();
 void check_request_timeout();
 static inline uint64_t cityhash(const uint64_t *s);
+bool global_raft_leader_found = false;
+bool is_raft = false;
+uint32_t global_raft_leader_ip = 0;
 #endif
 
 // These are both set by command-line arguments. Don't change them here.
@@ -437,7 +458,9 @@ void print_packet(char* direction, parsed_packet_t* packet) {
 
 bool count_start_message() {
     global_start_message_count++;
-    if (strcmp(test_type, "ONE_CONTEXT_FOUR_CORES") == 0) {
+    if (strcmp(test_type, "ONE_CONTEXT_ONE_CORE") == 0) {
+        return global_start_message_count >= NUMPORTS;
+    } else if (strcmp(test_type, "ONE_CONTEXT_FOUR_CORES") == 0) {
         return global_start_message_count >= 4 * NUMPORTS;
     } else if (strcmp(test_type, "FOUR_CONTEXTS_FOUR_CORES") == 0) {
         return global_start_message_count >= 4 * NUMPORTS;
@@ -480,6 +503,25 @@ void log_packet_response_time(parsed_packet_t* packet) {
     uint64_t delta_time = (recv_time > sent_time) ? (recv_time - sent_time) : 0;
     fprintf(stdout, "&&CSV&&ResponseTimes,%ld,%ld,%ld,%ld,%ld,%d,%f,%ld\n",
       service_time, delta_time, sent_time, recv_time, iter_time, src_context, get_avg_service_time(), request_rate_lambda_inverse);
+
+    if (is_raft) {
+        uint16_t msg_len = ntohs(packet->lnic->getLnicHeader()->msg_len);
+        if (msg_len != sizeof(raft_resp_t) + 2*sizeof(uint64_t)) {
+            // Make sure response is the right length
+            fprintf(stdout, "ERROR -- response message length is %d, should be %d\n", msg_len, sizeof(raft_resp_t) + 2*sizeof(uint64_t));
+            return;
+        }
+        raft_resp_t* resp_msg = (raft_resp_t*)packet->app->getLayerPayload();
+        uint64_t* msg_words = (uint64_t*)resp_msg;
+        fprintf(stdout, "%#lx, %#lx\n", msg_words[0], msg_words[1]);
+        if (be16toh(resp_msg->msg_id) != 5) {
+            fprintf(stdout, "Incorrect raft response msg id %d\n", be16toh(resp_msg->msg_id));
+            // Dump anything other than ReqType::kClientReqResponse messages
+            return;
+        }
+        uint32_t resp_type = be32toh(resp_msg->resp_type);
+        fprintf(stdout, "Raft message response type is %d\n", resp_type);
+    }
     // Verify MICA READ response:
     //uint16_t msg_len = ntohs(packet->lnic->getLnicHeader()->msg_len);
     //if (msg_len > 60) {
@@ -489,6 +531,38 @@ void log_packet_response_time(parsed_packet_t* packet) {
     //  uint64_t w2 = be64toh(msg_value[2]);
     //  fprintf(stdout, "GOT VALUE: 0x%lx 0x%lx 0x%lx\n", w0, w1, w2);
     //}
+}
+
+void find_raft_leader(parsed_packet_t* packet) {
+    uint16_t msg_len = ntohs(packet->lnic->getLnicHeader()->msg_len);
+    fprintf(stdout, "Finding raft leader recv message with length %d\n", msg_len);
+    if (msg_len != sizeof(raft_resp_t) + 2*sizeof(uint64_t)) {
+        // Dump anything other than raft response packets
+        return;
+    }
+    raft_resp_t* resp_msg = (raft_resp_t*)packet->app->getLayerPayload();
+    uint64_t* msg_words = (uint64_t*)resp_msg;
+    fprintf(stdout, "%#lx, %#lx, %#lx, %#lx\n", msg_words[0], msg_words[1], msg_words[2], msg_words[3]);
+    if (be16toh(resp_msg->msg_id) != 5) {
+        fprintf(stdout, "While finding leader, unknown msg type id %d\n", be16toh(resp_msg->msg_id));
+        // Dump anything other than ReqType::kClientReqResponse messages
+        return;
+    }
+    uint32_t resp_type = be32toh(resp_msg->resp_type);
+    fprintf(stdout, "While finding leader, resp type is %d\n", resp_type);
+    if (resp_type == 0) {
+        // Raft leader has been found
+        global_raft_leader_found = true;
+        global_raft_leader_ip = be64toh(resp_msg->leader_ip);
+    } else if (resp_type == 1) {
+        // Leader redirection
+        global_raft_leader_ip = be64toh(resp_msg->leader_ip);
+    } else if (resp_type == 2) {
+        // Unknown leader, do nothing
+        return;
+    } else {
+
+    }
 }
 
 void update_load() {
@@ -587,6 +661,9 @@ void send_load_packet(uint16_t dst_context, uint64_t service_time, uint64_t sent
     // Build the new ethernet/ip packet layers
     pcpp::EthLayer new_eth_layer(pcpp::MacAddress(LOAD_GEN_MAC), pcpp::MacAddress(NIC_MAC));
     pcpp::IPv4Layer new_ip_layer(pcpp::IPv4Address(std::string(LOAD_GEN_IP)), pcpp::IPv4Address(std::string(NIC_IP)));
+    if (is_raft) {
+        new_ip_layer.getIPv4Header()->ipDst = global_raft_leader_ip; 
+    }
     new_ip_layer.getIPv4Header()->ipId = htons(1);
     new_ip_layer.getIPv4Header()->timeToLive = 64;
     new_ip_layer.getIPv4Header()->protocol = 153; // Protocol code for LNIC
@@ -666,6 +743,18 @@ void send_load_packet(uint16_t dst_context, uint64_t service_time, uint64_t sent
       r_hdr.key[1] = htobe64(0x0);
       new_payload_layer = pcpp::PayloadLayer((uint8_t*)&r_hdr, sizeof(r_hdr), false);
       msg_len += new_payload_layer.getHeaderLen();
+    } else if (strcmp(load_type, "RAFT_WRITE") == 0) {
+        struct raft_req_header_t raft_req_hdr;
+        uint64_t rand_key = (*service_key_uniform_dist)(*dist_rand);
+        raft_req_hdr.msg_id = htobe16(2); // Raft ReqType::kClientReq
+        raft_req_hdr.key[0] = htobe64(rand_key);
+        raft_req_hdr.value[0] = htobe64(rand_key); // TODO: Check that this is the right endianness
+        fprintf(stdout, "raft req header is %#lx\n", *(uint64_t*)&raft_req_hdr);
+        new_payload_layer = pcpp::PayloadLayer((uint8_t*)&raft_req_hdr, sizeof(raft_req_header_t), false);
+        msg_len += new_payload_layer.getHeaderLen();
+        fprintf(stdout, "Raw dst ip is %#lx\n", new_ip_layer.getIPv4Header()->ipDst);
+    } else if (strcmp(load_type, "RAFT_READ") == 0) {
+        
     }
 
     new_lnic_layer.getLnicHeader()->msg_len = htons(msg_len);
@@ -679,7 +768,9 @@ void send_load_packet(uint16_t dst_context, uint64_t service_time, uint64_t sent
     new_packet.addLayer(&new_app_layer);
     if (strcmp(load_type, "MICA") == 0 ||
         strcmp(load_type, "CHAINREP") == 0 ||
-        strcmp(load_type, "CHAINREP_READ") == 0
+        strcmp(load_type, "CHAINREP_READ") == 0 ||
+        strcmp(load_type, "RAFT_WRITE") == 0 ||
+        strcmp(load_type, "RAFT_READ") == 0
         )
       new_packet.addLayer(&new_payload_layer);
 
@@ -704,7 +795,10 @@ void send_load_packet(uint16_t dst_context, uint64_t service_time, uint64_t sent
 #ifdef LOG_ALL_PACKETS
     print_packet("LOAD", &sent_packet);
 #endif
-    send_with_priority(0, new_tsp);
+    int flit_offset_doublebytes = (ETHER_HEADER_SIZE + IP_DST_FIELD_OFFSET + IP_SUBNET_OFFSET) / sizeof(uint16_t);
+    uint16_t switching_flit = ((uint16_t*)new_tsp->dat)[flit_offset_doublebytes];
+    uint16_t send_to_port = get_port_from_flit(switching_flit, 0);
+    send_with_priority(send_to_port, new_tsp);
     tx_request_count++;
     fprintf(stdout, "&&CSV&&RequestStats,%ld,%ld,%d,%f,%ld\n",
       sent_time, service_time, dst_context, get_avg_service_time(), request_rate_lambda_inverse);
@@ -723,10 +817,13 @@ bool load_gen_hook(switchpacket* tsp) {
     bool is_valid = packet.parse(tsp);
     if (!is_valid) {
         fprintf(stdout, "Invalid received packet.\n");
-        return true;
+        return false;
     }
     // Ignore packets that aren't for the load generator:
     if (packet.ip->getDstIpAddress() != pcpp::IPv4Address(std::string(LOAD_GEN_IP))) {
+#ifdef LOG_ALL_PACKETS
+    print_packet("FWD", &packet);
+#endif
       return false;
     }
 #ifdef LOG_ALL_PACKETS
@@ -786,7 +883,11 @@ bool load_gen_hook(switchpacket* tsp) {
                 start_message_received = true;
                 fprintf(stdout, "---- All Start Msgs Received! ---\n");
             }
+        } else if (is_raft && !global_raft_leader_found) {
+            // If this is a raft test, we need to find the raft leader first.
+            find_raft_leader(&packet);
         } else {
+        // Raft-specific, we might need to send 
             log_packet_response_time(&packet);
             rx_request_count++;
             if (rx_request_count >= num_requests) {
@@ -808,7 +909,9 @@ void generate_load_packets() {
     uint64_t service_time = get_service_time(dist);
     uint64_t sent_time = this_iter_cycles_start; // TODO: Check this
 
-    if (strcmp(test_type, "ONE_CONTEXT_FOUR_CORES") == 0) {
+    if (strcmp(test_type, "ONE_CONTEXT_ONE_CORE") == 0) {
+        send_load_packet(0, service_time, sent_time);
+    } else if (strcmp(test_type, "ONE_CONTEXT_FOUR_CORES") == 0) {
         send_load_packet(0, service_time, sent_time);
     } else if (strcmp(test_type, "FOUR_CONTEXTS_FOUR_CORES") == 0) {
         send_load_packet(rand() % 4, service_time, sent_time);
@@ -1024,6 +1127,10 @@ int main (int argc, char *argv[]) {
     service_normal_high = new std::normal_distribution<double>(bimodal_dist_high_mean, bimodal_dist_high_stdev);
     service_normal_low = new std::normal_distribution<double>(bimodal_dist_low_mean, bimodal_dist_low_stdev);
     service_select_dist = new std::binomial_distribution<int>(1, bimodal_dist_fraction_high);
+    if (strcmp(load_type, "RAFT_WRITE") == 0 || strcmp(load_type, "RAFT_READ") == 0) {
+        is_raft = true;
+        global_raft_leader_ip = be32toh(NIC_IP_BIGENDIAN);
+    }
     fprintf(stdout, "---- New Avg Arrival Time: %ld ----\n", request_rate_lambda_inverse);
 #endif
 

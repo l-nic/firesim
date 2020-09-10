@@ -404,10 +404,10 @@ class FireSimServerNode(FireSimNode):
         return cluster_servers
     
     def get_progargs(self):
-        if self.load_gen_stats and self.load_gen_stats.use_load_gen:
-            return [self.get_mac_address(), self.get_ip_address()] + self.get_load_gen_progargs()
-        elif self.raft_cluster and self.raft_cluster.use_raft_cluster:
+        if self.raft_cluster and self.raft_cluster.use_raft_cluster:
             return [self.get_mac_address(), self.get_ip_address()] + self.get_raft_cluster_progargs()
+        elif self.load_gen_stats and self.load_gen_stats.use_load_gen:
+            return [self.get_mac_address(), self.get_ip_address()] + self.get_load_gen_progargs()
         else:
             return [self.get_mac_address(), self.get_ip_address()]
 
