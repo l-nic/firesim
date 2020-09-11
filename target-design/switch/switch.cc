@@ -452,9 +452,14 @@ for (int port = 0; port < NUMPORTS; port++) {
 // Load generator specific code begin
 #ifdef USE_LOAD_GEN
 void print_packet(char* direction, parsed_packet_t* packet) {
-    fprintf(stdout, "%s IP(src=%s, dst=%s), %s, %s, packet_len=%d\n", direction,
+    uint16_t msg_len = ntohs(packet->lnic->getLnicHeader()->msg_len);
+    uint64_t* payload_base = (uint64_t*)packet->app->getLayerPayload();
+    uint64_t* last_word = payload_base + (msg_len / sizeof(uint64_t)) - 3;
+
+    fprintf(stdout, "%s IP(src=%s, dst=%s), %s, %s, packet_len=%d, timestamp=%ld, last_word=%ld\n", direction,
             packet->ip->getSrcIpAddress().toString().c_str(), packet->ip->getDstIpAddress().toString().c_str(),
-            packet->lnic->toString().c_str(), packet->app->toString().c_str(), packet->tsp->amtwritten * sizeof(uint64_t));
+            packet->lnic->toString().c_str(), packet->app->toString().c_str(), packet->tsp->amtwritten * sizeof(uint64_t),
+            packet->tsp->timestamp, be64toh(*last_word));
 }
 
 bool count_start_message() {
