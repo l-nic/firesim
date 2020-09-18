@@ -894,6 +894,7 @@ bool load_gen_hook(switchpacket* tsp) {
             }
         } else if (is_raft && !global_raft_leader_found) {
             // If this is a raft test, we need to find the raft leader first.
+            rx_request_count++;
             find_raft_leader(&packet);
         } else {
         // Raft-specific, we might need to send 
