@@ -21,6 +21,7 @@
 #include "Packet.h"
 #include "EthLayer.h"
 #include "IPv4Layer.h"
+#include "classbench_trace.h"
 
 #define IGNORE_PRINTF
 
@@ -158,6 +159,18 @@ struct __attribute__((packed)) raft_resp_t {
     uint32_t resp_type;
 };
 
+#define CLASSIFICATION_HEADER_WORDS 3
+struct __attribute__((__packed__)) classification_hdr_t {
+  uint32_t trace_idx;
+  uint32_t match_priority;
+  uint64_t headers[CLASSIFICATION_HEADER_WORDS];
+};
+
+//const char* trace_filename = "/tmp/classbench_trace";
+const char* trace_filename = NULL; // set to null to use small inline trace
+uint32_t num_trace_packets;
+trace_packet* trace_packets;
+uint32_t next_trace_idx = 0;
 
 // Comment this out to disable pkt trimming
 #define TRIM_PKTS
@@ -237,8 +250,8 @@ class parsed_packet_t {
 #define LOAD_GEN_MAC "08:55:66:77:88:08"
 #define LOAD_GEN_IP "10.0.0.1"
 #define NIC_MAC "00:26:E1:00:00:00"
-#define NIC_IP "10.0.0.3"
-#define NIC_IP_BIGENDIAN 0x0a000003
+#define NIC_IP "10.0.0.2"
+#define NIC_IP_BIGENDIAN 0x0a000002
 #define MAX_TX_MSG_ID 127
 #define APP_HEADER_SIZE 16
 uint64_t tx_request_count = 0;
@@ -537,6 +550,21 @@ void log_packet_response_time(parsed_packet_t* packet) {
     //  uint64_t w2 = be64toh(msg_value[2]);
     //  fprintf(stdout, "GOT VALUE: 0x%lx 0x%lx 0x%lx\n", w0, w1, w2);
     //}
+#if 0
+    // Verify classification response:
+    uint16_t msg_len = ntohs(packet->lnic->getLnicHeader()->msg_len);
+    if (msg_len > 32) {
+      struct classification_hdr_t *h = (struct classification_hdr_t *)packet->app->getLayerPayload();
+      uint32_t trace_idx = be32toh(h->trace_idx);
+      int32_t match_priority = (int32_t)be32toh(h->match_priority);
+      if (trace_idx < num_trace_packets) {
+        if (match_priority != trace_packets[trace_idx].match_priority)
+          fprintf(stdout, "WARNING: packet %u matched priority %d (should be %d)\n", trace_idx, match_priority, trace_packets[trace_idx].match_priority);
+        else fprintf(stdout, "CORRECT MATCH: packet %u matched priority %u\n", trace_idx, match_priority);
+      } else
+        fprintf(stdout, "ERROR: invalid trace idx: %u (match_priority: %d)\n", trace_idx, match_priority);
+    }
+#endif
 }
 
 void find_raft_leader(parsed_packet_t* packet) {
@@ -713,6 +741,18 @@ void send_load_packet(uint16_t dst_context, uint64_t service_time, uint64_t sent
       new_payload_layer = pcpp::PayloadLayer((uint8_t*)&mica_hdr, mica_hdr_size, false);
       msg_len += new_payload_layer.getHeaderLen();
     }
+    else if (strcmp(load_type, "CLASSIFICATION") == 0) {
+      struct classification_hdr_t class_hdr;
+      uint32_t trace_idx = next_trace_idx;
+      next_trace_idx = (next_trace_idx + 1) % num_trace_packets;
+      const uint32_t *trace_headers = trace_packets[trace_idx].get();
+      class_hdr.trace_idx = htobe32(trace_idx);
+      class_hdr.match_priority = 0;
+      for (int i = 0; i < CLASSIFICATION_HEADER_WORDS; i++)
+        class_hdr.headers[i] = htobe64(*(uint64_t*)&trace_headers[i*2]);
+      new_payload_layer = pcpp::PayloadLayer((uint8_t*)&class_hdr, sizeof(class_hdr), false);
+      msg_len += new_payload_layer.getHeaderLen();
+    }
     else if (strcmp(load_type, "CHAINREP") == 0) {
       struct chainrep_w_hdr_t w_hdr;
 #define CHAINREP_CLIENT_IP 0x0a000002
@@ -776,6 +816,7 @@ void send_load_packet(uint16_t dst_context, uint64_t service_time, uint64_t sent
     new_packet.addLayer(&new_lnic_layer);
     new_packet.addLayer(&new_app_layer);
     if (strcmp(load_type, "MICA") == 0 ||
+        strcmp(load_type, "CLASSIFICATION") == 0 ||
         strcmp(load_type, "CHAINREP") == 0 ||
         strcmp(load_type, "CHAINREP_READ") == 0 ||
         strcmp(load_type, "RAFT_WRITE") == 0 ||
@@ -1142,6 +1183,31 @@ int main (int argc, char *argv[]) {
         global_raft_leader_ip = be32toh(NIC_IP_BIGENDIAN);
     }
     fprintf(stdout, "---- New Avg Arrival Time: %ld ----\n", request_rate_lambda_inverse);
+
+    if (trace_filename) {
+      std::vector<uint32_t> arbitrary_fields;
+      trace_packets = read_trace_file(trace_filename, arbitrary_fields, &num_trace_packets);
+      if (!trace_packets) {
+        fprintf(stderr, "error while reading trace file: %s\n", trace_filename);
+        exit(1);
+      }
+    }
+    else {
+      // A small trace that's matched by the first 100 rules of acl1_seed_100k
+      num_trace_packets = 10;
+      trace_packets = new trace_packet[10];
+      trace_packets[0].header = {532746804, 3397109384, 43204, 1521,  6, 0}; trace_packets[0].match_priority = 94;
+      trace_packets[1].header = {520899175, 3396744005, 33500, 1715,  6, 0}; trace_packets[1].match_priority = 73;
+      trace_packets[2].header = {525102834, 3396784787, 26901, 6790,  6, 0}; trace_packets[2].match_priority = 85;
+      trace_packets[3].header = {475623671, 3396388276, 10205, 5631,  6, 0}; trace_packets[3].match_priority = 34;
+      trace_packets[4].header = {492908153, 3396476695, 11394, 19856, 6, 0}; trace_packets[4].match_priority = 9;
+      trace_packets[5].header = {520346879, 3396746798, 14598, 20,    6, 0}; trace_packets[5].match_priority = 76;
+      trace_packets[6].header = {496792388, 3396337836, 8702,  1711,  6, 0}; trace_packets[6].match_priority = 26;
+      trace_packets[7].header = {533223626, 219940546,  47855, 1705,  6, 0}; trace_packets[7].match_priority = 93;
+      trace_packets[8].header = {492908153, 3396476695, 43418, 19856, 6, 0}; trace_packets[8].match_priority = 9;
+      trace_packets[9].header = {520382556, 3396746440, 6686,  2121,  6, 0}; trace_packets[9].match_priority = 77;
+    }
+
 #endif
 
     simplify_frac(bandwidth, 200, &throttle_numer, &throttle_denom);
