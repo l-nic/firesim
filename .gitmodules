@@ -1,6 +1,6 @@
 [submodule "platforms/f1/aws-fpga"]
 	path = platforms/f1/aws-fpga
-	url = https://github.com/firesim/aws-fpga-firesim
+	url = https://github.com/l-nic/aws-fpga-firesim
 [submodule "target-design/chipyard"]
 	path = target-design/chipyard
 	url = https://github.com/ucb-bar/chipyard
@@ -28,9 +28,12 @@
 [submodule "sim/firesim-lib/src/main/cc/lib/boost"]
 	path = sim/firesim-lib/src/main/cc/lib/boost
 	url = https://github.com/boostorg/boost
+	ignore = dirty
 [submodule "sim/firesim-lib/src/main/cc/lib/elfutils"]
 	path = sim/firesim-lib/src/main/cc/lib/elfutils
 	url = git://sourceware.org/git/elfutils.git
+	ignore = dirty
 [submodule "sim/firesim-lib/src/main/cc/lib/libdwarf"]
 	path = sim/firesim-lib/src/main/cc/lib/libdwarf
 	url = git://git.code.sf.net/p/libdwarf/code
+	ignore = dirty
