@@ -1,8 +1,9 @@
+include /usr/local/etc/PcapPlusPlus.mk
 
 all: switch
 
 switch: switch.cc baseport.h shmemport.h flit.h socketport.h switchconfig.h
-	g++ -g3 -O3 -std=gnu++11 -o switch switch.cc -fopenmp -lrt
+	g++ -g3 -O3 -std=gnu++11 $(PCAPPP_BUILD_FLAGS) $(PCAPPP_INCLUDES) -o switch switch.cc -fopenmp -lrt -l:libPcap++.a -l:libPacket++.a -l:libCommon++.a
 
 
 sim:

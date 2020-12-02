@@ -39,17 +39,22 @@ class BasePort {
         switchpacket * output_in_progress = NULL;
 
         std::queue<switchpacket*> inputqueue;
-        std::queue<switchpacket*> outputqueue;
+        std::queue<switchpacket*> outputqueue_low;
+        std::queue<switchpacket*> outputqueue_high;
+
+        size_t outputqueue_low_size;
+        size_t outputqueue_high_size;
 
         int push_input(switchpacket *sp);
 
     protected:
         int _portNo;
         bool _throttle;
+
 };
 
 BasePort::BasePort(int portNo, bool throttle)
-    : _portNo(portNo), _throttle(throttle)
+    : _portNo(portNo), _throttle(throttle), outputqueue_low_size(0), outputqueue_high_size(0)
 {
 }
 
@@ -94,8 +99,17 @@ void BasePort::write_flits_to_output() {
 
     this->pauseCycles -= flitswritten;
 
-    while (!(outputqueue.empty())) {
-        switchpacket *thispacket = outputqueue.front();
+    while (!(outputqueue_low.empty()) || !(outputqueue_high.empty())) {
+        switchpacket *thispacket;
+        bool high_priority;
+        if (!outputqueue_high.empty()) {
+            // Strict priority, drain only high priority queue first.
+            thispacket = outputqueue_high.front();
+            high_priority = true;
+        } else {
+            thispacket = outputqueue_low.front();
+            high_priority = false;
+        }
         // first, check timing boundaries.
         uint64_t space_available = LINKLATENCY - flitswritten;
         uint64_t outputtimestamp = thispacket->timestamp;
@@ -111,7 +125,13 @@ void BasePort::write_flits_to_output() {
                 // this packet would've been dropped due to buffer overflow.
                 // so, drop it.
                 printf("overflow, drop pack: intended timestamp: %ld, current timestamp: %ld, out bufsize in # flits: %ld, diff: %ld\n", outputtimestamp, basetime + flitswritten, OUTPUT_BUF_SIZE, (int64_t)(basetime + flitswritten) - (int64_t)(outputtimestamp));
-                outputqueue.pop();
+                if (high_priority) {
+                    outputqueue_high_size -= thispacket->amtwritten * sizeof(uint64_t);
+                    outputqueue_high.pop();
+                } else {
+                    outputqueue_low.pop();
+                    outputqueue_low_size -= thispacket->amtwritten * sizeof(uint64_t);
+                }
                 free(thispacket);
                 continue;
             }
@@ -130,6 +150,13 @@ void BasePort::write_flits_to_output() {
                 printf("packet timestamp: %ld, len: %ld, receiver: %d\n",
                         basetime + flitswritten, thispacket->amtwritten, _portNo);
             }
+
+            // Note that this assumes throttle will be 1 / 1
+            if (flitswritten + thispacket->amtwritten >= LINKLATENCY) {
+                // If we're going to only end up writing part of a packet to the output buffer, we need to stop beforehand
+                // Nothing will be dropped here yet, but the next inbound packets could be dropped if the buffers fill up.
+                break;
+            }
             for (;(i < thispacket->amtwritten) && (flitswritten < LINKLATENCY); i++) {
                 write_last_flit(current_output_buf, flitswritten, i == (thispacket->amtwritten-1));
                 write_valid_flit(current_output_buf, flitswritten);
@@ -145,7 +172,13 @@ void BasePort::write_flits_to_output() {
             }
             if (i == thispacket->amtwritten) {
                 // we finished sending this packet, so get rid of it
-                outputqueue.pop();
+                if (high_priority) {
+                    outputqueue_high.pop();
+                    outputqueue_high_size -= thispacket->amtwritten * sizeof(uint64_t);
+                } else {
+                    outputqueue_low.pop();
+                    outputqueue_low_size -= thispacket->amtwritten * sizeof(uint64_t);
+                }
                 free(thispacket);
             } else {
                 // we're not done sending this packet, so mark how much has been sent

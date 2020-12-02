@@ -8,7 +8,7 @@ import datetime
 
 from switch_model_config import *
 from firesim_topology_core import *
-from utils import MacAddress
+from utils import MacAddress, IpAddress
 from fabric.api import *
 from colorama import Fore, Style
 import types
@@ -37,8 +37,8 @@ class FireSimTopologyWithPasses:
                  defaulttraceenable, defaulttraceselect, defaulttracestart, defaulttraceend,
                  defaulttraceoutputformat,
                  defaultautocounterreadrate, terminateoncompletion,
-                 defaultzerooutdram,
-                 defaultprintstart, defaultprintend, defaultprintcycleprefix):
+                 defaultzerooutdram, high_priority_obuf_size, low_priority_obuf_size,
+                 wait_for_all_sims, default_timeout_cycles, default_rtt_pkts, load_gen_stats, raft_cluster):
         self.passes_used = []
         self.user_topology_name = user_topology_name
         self.no_net_num_nodes = no_net_num_nodes
@@ -58,10 +58,15 @@ class FireSimTopologyWithPasses:
         self.defaulttraceoutputformat = defaulttraceoutputformat
         self.defaultautocounterreadrate = defaultautocounterreadrate
         self.defaultzerooutdram = defaultzerooutdram
-        self.defaultprintstart = defaultprintstart
-        self.defaultprintend = defaultprintend
-        self.defaultprintcycleprefix = defaultprintcycleprefix
         self.terminateoncompletion = terminateoncompletion
+        self.wait_for_all_sims = wait_for_all_sims
+        self.default_timeout_cycles = default_timeout_cycles
+        self.default_rtt_pkts = default_rtt_pkts
+        self.load_gen_stats = load_gen_stats
+        self.raft_cluster = raft_cluster
+
+        self.high_priority_obuf_size = high_priority_obuf_size
+        self.low_priority_obuf_size = low_priority_obuf_size
 
         self.phase_one_passes()
 
@@ -79,16 +84,24 @@ class FireSimTopologyWithPasses:
         for node in nodes_dfs_order:
             if isinstance(node, FireSimServerNode):
                 node.assign_mac_address(MacAddress())
+    
+    def pass_assign_ip_addresses(self):
+        self.passes_used.append("pass_assign_ip_addresses")
+        nodes_dfs_order = self.firesimtopol.get_dfs_order()
+        IpAddress.reset_allocator()
+        for node in nodes_dfs_order:
+            if isinstance(node, FireSimServerNode):
+                node.assign_ip_address(IpAddress())
 
 
     def pass_compute_switching_tables(self):
-        """ This creates the MAC addr -> port lists for switch nodes.
+        """ This creates the IP addr -> port lists for switch nodes.
 
-        a) First, a pass that computes "downlinkmacs" for each node, which
-        represents all of the MAC addresses that are reachable on the downlinks
+        a) First, a pass that computes "downlinkips" for each node, which
+        represents all of the IP addresses that are reachable on the downlinks
         of this switch, to advertise to uplinks.
 
-        b) Next, a pass that actually constructs the MAC addr -> port lists
+        b) Next, a pass that actually constructs the IP addr -> port lists
         for switch nodes.
 
         It is assumed that downlinks take ports [0, num downlinks) and
@@ -98,17 +111,18 @@ class FireSimTopologyWithPasses:
         switch models do not handle load balancing across multiple paths.
         """
 
-        # this pass requires mac addresses to already be assigned
+        # this pass requires mac and ip addresses to already be assigned
         assert "pass_assign_mac_addresses" in self.passes_used
+        assert "pass_assign_ip_addresses" in self.passes_used
         self.passes_used.append("pass_compute_switching_tables")
 
         nodes_dfs_order = self.firesimtopol.get_dfs_order()
         for node in nodes_dfs_order:
             if isinstance(node, FireSimServerNode):
-                node.downlinkmacs = [node.get_mac_address()]
+                node.downlinkips = [node.get_ip_address()]
             else:
-                childdownlinkmacs = [x.get_downlink_side().downlinkmacs for x in node.downlinks]
-                node.downlinkmacs = reduce(lambda x, y: x + y, childdownlinkmacs)
+                childdownlinkips = [x.get_downlink_side().downlinkips for x in node.downlinks]
+                node.downlinkips = reduce(lambda x, y: x + y, childdownlinkips)
 
         switches_dfs_order = self.firesimtopol.get_dfs_order_switches()
 
@@ -116,11 +130,11 @@ class FireSimTopologyWithPasses:
             uplinkportno = len(switch.downlinks)
 
             # prepopulate the table with the last port, which will be
-            switchtab = [uplinkportno for x in range(MacAddress.next_mac_to_allocate())]
+            switchtab = [uplinkportno for x in range(IpAddress.next_ip_to_allocate())]
             for port_no in range(len(switch.downlinks)):
-                portmacs = switch.downlinks[port_no].get_downlink_side().downlinkmacs
-                for mac in portmacs:
-                    switchtab[mac.as_int_no_prefix()] = port_no
+                portips = switch.downlinks[port_no].get_downlink_side().downlinkips
+                for ip in portips:
+                    switchtab[ip.as_int_no_prefix()] = port_no
 
             switch.switch_table = switchtab
 
@@ -302,6 +316,12 @@ class FireSimTopologyWithPasses:
                     node.switch_switching_latency = self.defaultswitchinglatency
                 if node.switch_bandwidth is None:
                     node.switch_bandwidth = self.defaultnetbandwidth
+                if node.high_priority_obuf_size is None:
+                    node.high_priority_obuf_size = self.high_priority_obuf_size
+                if node.low_priority_obuf_size is None:
+                    node.low_priority_obuf_size = self.low_priority_obuf_size
+                if node.load_gen_stats is None:
+                    node.load_gen_stats = self.load_gen_stats
 
             if isinstance(node, FireSimServerNode):
                 if node.server_link_latency is None:
@@ -325,12 +345,14 @@ class FireSimTopologyWithPasses:
                     node.autocounter_readrate = self.defaultautocounterreadrate
                 if node.zerooutdram is None:
                     node.zerooutdram = self.defaultzerooutdram
-                if node.print_start is None:
-                    node.print_start = self.defaultprintstart
-                if node.print_end is None:
-                    node.print_end = self.defaultprintend
-                if node.print_cycle_prefix is None:
-                    node.print_cycle_prefix = self.defaultprintcycleprefix
+                if node.timeout_cycles is None:
+                    node.timeout_cycles = self.default_timeout_cycles
+                if node.rtt_pkts is None:
+                    node.rtt_pkts = self.default_rtt_pkts
+                if node.load_gen_stats is None:
+                    node.load_gen_stats = self.load_gen_stats
+                if node.raft_cluster is None:
+                    node.raft_cluster = self.raft_cluster
 
 
     def pass_allocate_nbd_devices(self):
@@ -352,6 +374,7 @@ class FireSimTopologyWithPasses:
         i.e. can be run before you have run launchrunfarm. They're run
         automatically when creating this object. """
         self.pass_assign_mac_addresses()
+        self.pass_assign_ip_addresses()
         self.pass_compute_switching_tables()
         self.pass_perform_host_node_mapping() # TODO: we can know ports here?
         self.pass_apply_default_hwconfig()
@@ -565,45 +588,67 @@ class FireSimTopologyWithPasses:
 
         # run polling loop
         while True:
-            """ break out of this loop when either all sims are completed (no
-            network) or when one sim is completed (networked case) """
+            try:
+                """ break out of this loop when either all sims are completed (no
+                network) or when one sim is completed (networked case) """
 
-            def get_jobs_completed_local_info():
-                # this is a list of jobs completed, since any completed job will have
-                # a directory within this directory.
-                jobscompleted = os.listdir(self.workload.job_results_dir)
-                rootLogger.debug("dir based jobs completed: " + str(jobscompleted))
-                return jobscompleted
+                def get_jobs_completed_local_info():
+                    # this is a list of jobs completed, since any completed job will have
+                    # a directory within this directory.
+                    jobscompleted = os.listdir(self.workload.job_results_dir)
+                    rootLogger.debug("dir based jobs completed: " + str(jobscompleted))
+                    return jobscompleted
 
-            jobscompleted = get_jobs_completed_local_info()
+                jobscompleted = get_jobs_completed_local_info()
 
 
-            # this job on the instance should return all the state about the instance
-            # e.g.:
-            # if an instance has been terminated (really - is termination
-            # requested and no jobs are left, then we will have implicitly
-            # terminated
-            teardown = False
-            instancestates = execute(monitor_jobs_wrapper, self.run_farm,
-                                    jobscompleted, teardown,
-                                    self.terminateoncompletion,
-                                    self.workload.job_results_dir,
-                                    hosts=all_runfarm_ips)
+                # this job on the instance should return all the state about the instance
+                # e.g.:
+                # if an instance has been terminated (really - is termination
+                # requested and no jobs are left, then we will have implicitly
+                # terminated
+                teardown = False
+                instancestates = execute(monitor_jobs_wrapper, self.run_farm,
+                                        jobscompleted, teardown,
+                                        self.terminateoncompletion,
+                                        self.workload.job_results_dir,
+                                        hosts=all_runfarm_ips)
 
-            # log sim state, raw
-            rootLogger.debug(pprint.pformat(instancestates))
+                # log sim state, raw
+                rootLogger.debug(pprint.pformat(instancestates))
 
-            # log sim state, properly
-            loop_logger(instancestates, self.terminateoncompletion)
+                # log sim state, properly
+                loop_logger(instancestates, self.terminateoncompletion)
 
-            jobs_complete_dict = dict()
-            simstates = [x['sims'] for x in instancestates.values()]
-            global_status = [jobs_complete_dict.update(x) for x in simstates]
-            global_status = jobs_complete_dict.values()
-            rootLogger.debug("jobs complete dict " + str(jobs_complete_dict))
-            rootLogger.debug("global status: " + str(global_status))
+                jobs_complete_dict = dict()
+                simstates = [x['sims'] for x in instancestates.values()]
+                global_status = [jobs_complete_dict.update(x) for x in simstates]
+                global_status = jobs_complete_dict.values()
+                rootLogger.debug("jobs complete dict " + str(jobs_complete_dict))
+                rootLogger.debug("global status: " + str(global_status))
 
-            if teardown_required and any(global_status):
+                if (not self.wait_for_all_sims and teardown_required and any(global_status)) or \
+                    (self.wait_for_all_sims and teardown_required and all(global_status)):
+                    # in this case, do the teardown, then call exec again, then exit
+                    rootLogger.info("Teardown required, manually tearing down...")
+                    # do not disconnect nbds, because we may need them for copying
+                    # results. the process of copying results will tear them down anyway
+                    self.kill_simulation_passes(use_mock_instances_for_testing, disconnect_all_nbds=False)
+                    rootLogger.debug("continuing one more loop to fully copy results and terminate")
+                    teardown = True
+                    # get latest local info about jobs completed. avoid extra copy
+                    jobscompleted = get_jobs_completed_local_info()
+                    instancestates = execute(monitor_jobs_wrapper, self.run_farm,
+                                            jobscompleted, teardown,
+                                            self.terminateoncompletion,
+                                            self.workload.job_results_dir,
+                                            hosts=all_runfarm_ips)
+                    break
+                if not teardown_required and all(global_status):
+                    break
+
+                time.sleep(10)
+            except KeyboardInterrupt:
                 # in this case, do the teardown, then call exec again, then exit
                 rootLogger.info("Teardown required, manually tearing down...")
                 # do not disconnect nbds, because we may need them for copying
@@ -619,10 +664,6 @@ class FireSimTopologyWithPasses:
                                         self.workload.job_results_dir,
                                         hosts=all_runfarm_ips)
                 break
-            if not teardown_required and all(global_status):
-                break
-
-            time.sleep(10)
 
         # run post-workload hook, if one exists
         if self.workload.post_run_hook is not None:

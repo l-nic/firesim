@@ -17,6 +17,7 @@ from runtools.run_farm import RunFarm
 from util.streamlogger import StreamLogger
 import os
 
+
 LOCAL_DRIVERS_BASE = "../sim/output/f1/"
 LOCAL_DRIVERS_GENERATED_SRC = "../sim/generated-src/f1/"
 CUSTOM_RUNTIMECONFS_BASE = "../sim/custom-runtime-configs/"
@@ -78,21 +79,44 @@ class RuntimeHWConfig:
             runtime_conf_local = CUSTOM_RUNTIMECONFS_BASE + my_runtimeconfig
         return runtime_conf_local
 
-    def get_boot_simulation_command(self, slotid, all_macs,
+    # TODO: Delete this and bake the assertion definitions into the Driver
+    def get_local_assert_def_path(self):
+        """ return relative local path of the synthesized assertion definitions. """
+        my_deploytriplet = self.get_deploytriplet_for_config()
+        gen_src_dir = LOCAL_DRIVERS_GENERATED_SRC + "/" + my_deploytriplet + "/"
+        assert_def_local = gen_src_dir + self.get_design_name() + ".asserts"
+        return assert_def_local
+
+    #def get_boot_simulation_command(self, slotid, all_macs,
+    #                                          all_rootfses, all_linklatencies,
+    #                                          all_netbws, profile_interval,
+    #                                          all_bootbinaries, trace_enable,
+    #                                          trace_select, trace_start, trace_end,
+    #                                          trace_output_format,
+    #                                          autocounter_readrate, all_shmemportnames,
+    #                                          enable_zerooutdram,
+    #                                          print_start, print_end,
+    #                                          enable_print_cycle_prefix):
+    def get_boot_simulation_command(self, slotid, all_nic_macs,
+                                              all_switch_macs, all_nic_ips,
+                                              all_timeout_cycles, all_rtt_pkts,
                                               all_rootfses, all_linklatencies,
                                               all_netbws, profile_interval,
-                                              all_bootbinaries, trace_enable,
+                                              all_bootbinaries, all_progargs, trace_enable,
                                               trace_select, trace_start, trace_end,
                                               trace_output_format,
                                               autocounter_readrate, all_shmemportnames,
-                                              enable_zerooutdram,
-                                              print_start, print_end,
-                                              enable_print_cycle_prefix):
+                                              enable_zerooutdram):
         """ return the command used to boot the simulation. this has to have
         some external params passed to it, because not everything is contained
         in a runtimehwconfig. TODO: maybe runtimehwconfig should be renamed to
         pre-built runtime config? It kinda contains a mix of pre-built and
         runtime parameters currently. """
+
+        print_start = 0
+        print_end = -1
+        all_macs = all_nic_macs
+        enable_print_cycle_prefix = True
 
         # TODO: supernode support
         tracefile = "+tracefile=TRACEFILE" if trace_enable else ""
@@ -125,7 +149,17 @@ class RuntimeHWConfig:
         command_niclogs = array_to_lognames(all_macs, "niclog")
         command_blkdev_logs = array_to_lognames(all_rootfses, "blkdev-log")
 
-        command_bootbinaries = array_to_plusargs(all_bootbinaries, "+prog")
+        all_progfulls = []
+        for i in range(len(all_bootbinaries)):
+            progfull = str(all_bootbinaries[i])
+            for arg in all_progargs[i]:
+                #progfull += "^" + str(arg)
+                progfull += " " + str(arg)
+            all_progfulls.append(progfull)
+        command_bootbinaries = array_to_plusargs(all_progfulls, "+prog")
+        #command_bootbinaries = str(all_bootbinaries[0])
+
+        #command_bootbinaries = array_to_plusargs(all_bootbinaries, "+prog")
         zero_out_dram = "+zero-out-dram" if (enable_zerooutdram) else ""
         print_cycle_prefix = "+print-no-cycle-prefix" if not enable_print_cycle_prefix else ""
 
@@ -181,14 +215,7 @@ class RuntimeHWConfig:
         target_config = triplet_pieces[1]
         platform_config = triplet_pieces[2]
         rootLogger.info("Building FPGA software driver for " + str(self.get_deploytriplet_for_config()))
-        with prefix('cd ../'), \
-             prefix('export RISCV={}'.format(os.getenv('RISCV', ""))), \
-             prefix('export PATH={}'.format(os.getenv('PATH', ""))), \
-             prefix('export LD_LIBRARY_PATH={}'.format(os.getenv('LD_LIBRARY_PATH', ""))), \
-             prefix('source ./sourceme-f1-manager.sh'), \
-             prefix('cd sim/'), \
-             StreamLogger('stdout'), \
-             StreamLogger('stderr'):
+        with prefix('cd ../'), prefix('source ./sourceme-f1-manager.sh'), prefix('cd sim/'), StreamLogger('stdout'), StreamLogger('stderr'):
             localcap = None
             with settings(warn_only=True):
                 driverbuildcommand = """make DESIGN={} TARGET_CONFIG={} PLATFORM_CONFIG={} f1""".format(design, target_config, platform_config)
@@ -227,6 +254,36 @@ class RuntimeHWDB:
 
 class InnerRuntimeConfiguration:
     """ Pythonic version of config_runtime.ini """
+
+    class LoadGenStats:
+        use_load_gen = None
+        test_type = None
+        load_type = None
+        service_dist_type = None
+        request_dist_type = None
+        num_requests = None
+        request_rate_lambda_inverse_start = None
+        request_rate_lambda_inverse_stop = None
+        request_rate_lambda_inverse_dec = None
+        min_service_time = None
+        max_service_time = None
+        min_service_key = None
+        max_service_key = None
+        exp_dist_scale_factor = None
+        exp_dist_decay_const = None
+        bimodal_dist_high_mean = None
+        bimodal_dist_high_stdev = None
+        bimodal_dist_low_mean = None
+        bimodal_dist_low_stdev = None
+        bimodal_dist_fraction_high = None
+        fixed_dist_cycles = None
+        c1_stall_factor = None
+        c1_stall_freq = None
+        rtt_pkts = None
+    
+    class RaftCluster:
+        use_raft_cluster = None
+        num_servers = None
 
     def __init__(self, runtimeconfigfile, configoverridedata):
         runtime_configfile = ConfigParser.ConfigParser(allow_no_value=True)
@@ -272,6 +329,48 @@ class InnerRuntimeConfiguration:
         self.switchinglatency = int(runtime_dict['targetconfig']['switchinglatency'])
         self.netbandwidth = int(runtime_dict['targetconfig']['netbandwidth'])
         self.profileinterval = int(runtime_dict['targetconfig']['profileinterval'])
+        self.high_priority_obuf_size = int(runtime_dict['targetconfig']['high_priority_obuf_size'])
+        self.low_priority_obuf_size = int(runtime_dict['targetconfig']['low_priority_obuf_size'])
+        self.default_timeout_cycles = int(runtime_dict['targetconfig']['timeout_cycles'])
+        self.default_rtt_pkts = int(runtime_dict['targetconfig']['rtt_pkts'])
+
+        if 'load_gen' in runtime_dict:
+            self.load_gen_stats = self.LoadGenStats()
+            self.load_gen_stats.use_load_gen = runtime_dict['load_gen']['use_load_gen'] == "yes"
+            self.load_gen_stats.test_type = runtime_dict['load_gen']['test_type']
+            self.load_gen_stats.load_type = runtime_dict['load_gen']['load_type'] if 'load_type' in runtime_dict['load_gen'] else 'DEFAULT'
+            self.load_gen_stats.service_dist_type = runtime_dict['load_gen']['service_dist_type']
+            self.load_gen_stats.request_dist_type = runtime_dict['load_gen']['request_dist_type']
+            self.load_gen_stats.num_requests = runtime_dict['load_gen']['num_requests']
+            self.load_gen_stats.request_rate_lambda_inverse_start = runtime_dict['load_gen']['request_rate_lambda_inverse_start']
+            self.load_gen_stats.request_rate_lambda_inverse_stop = runtime_dict['load_gen']['request_rate_lambda_inverse_stop']
+            self.load_gen_stats.request_rate_lambda_inverse_dec = runtime_dict['load_gen']['request_rate_lambda_inverse_dec']
+            self.load_gen_stats.min_service_time = runtime_dict['load_gen']['min_service_time']
+            self.load_gen_stats.max_service_time = runtime_dict['load_gen']['max_service_time']
+            self.load_gen_stats.min_service_key = runtime_dict['load_gen']['min_service_key'] if 'min_service_key' in runtime_dict['load_gen'] else 0
+            self.load_gen_stats.max_service_key = runtime_dict['load_gen']['max_service_key'] if 'max_service_key' in runtime_dict['load_gen'] else 0
+            self.load_gen_stats.exp_dist_scale_factor = runtime_dict['load_gen']['exp_dist_scale_factor']
+            self.load_gen_stats.exp_dist_decay_const = runtime_dict['load_gen']['exp_dist_decay_const']
+            self.load_gen_stats.bimodal_dist_high_mean = runtime_dict['load_gen']['bimodal_dist_high_mean']
+            self.load_gen_stats.bimodal_dist_high_stdev = runtime_dict['load_gen']['bimodal_dist_high_stdev']
+            self.load_gen_stats.bimodal_dist_low_mean = runtime_dict['load_gen']['bimodal_dist_low_mean']
+            self.load_gen_stats.bimodal_dist_low_stdev = runtime_dict['load_gen']['bimodal_dist_low_stdev']
+            self.load_gen_stats.bimodal_dist_fraction_high = runtime_dict['load_gen']['bimodal_dist_fraction_high']
+            self.load_gen_stats.fixed_dist_cycles = runtime_dict['load_gen']['fixed_dist_cycles']
+            self.load_gen_stats.c1_stall_factor = runtime_dict['load_gen']['c1_stall_factor']
+            self.load_gen_stats.c1_stall_freq = runtime_dict['load_gen']['c1_stall_freq']
+            self.load_gen_stats.rtt_pkts = str(self.default_rtt_pkts)
+        else:
+            self.load_gen_stats = self.LoadGenStats()
+            self.load_gen_stats.use_load_gen = False
+        
+        if 'raft_cluster' in runtime_dict:
+            self.raft_cluster = self.RaftCluster()
+            self.raft_cluster.use_raft_cluster = runtime_dict['raft_cluster']['use_raft_cluster'] == "yes"
+            self.raft_cluster.num_servers = runtime_dict['raft_cluster']['num_servers']
+        else:
+            self.raft_cluster = self.RaftCluster()
+            self.raft_cluster.use_raft_cluster = False
         # Default values
         self.trace_enable = False
         self.trace_select = "0"
@@ -280,10 +379,6 @@ class InnerRuntimeConfiguration:
         self.trace_output_format = "0"
         self.autocounter_readrate = 0
         self.zerooutdram = False
-        self.print_start = "0"
-        self.print_end = "-1"
-        self.print_cycle_prefix = True
-
         if 'tracing' in runtime_dict:
             self.trace_enable = runtime_dict['tracing'].get('enable') == "yes"
             self.trace_select = runtime_dict['tracing'].get('selector', "0")
@@ -295,15 +390,12 @@ class InnerRuntimeConfiguration:
         self.defaulthwconfig = runtime_dict['targetconfig']['defaulthwconfig']
         if 'hostdebug' in runtime_dict:
             self.zerooutdram = runtime_dict['hostdebug'].get('zerooutdram') == "yes"
-        if 'synthprint' in runtime_dict:
-            self.print_start = runtime_dict['synthprint'].get("start", "0")
-            self.print_end = runtime_dict['synthprint'].get("end", "-1")
-            self.print_cycle_prefix = runtime_dict['synthprint'].get("cycleprefix", "yes") == "yes"
 
         self.workload_name = runtime_dict['workload']['workloadname']
         # an extra tag to differentiate workloads with the same name in results names
         self.suffixtag = runtime_dict['workload']['suffixtag'] if 'suffixtag' in runtime_dict['workload'] else ""
         self.terminateoncompletion = runtime_dict['workload']['terminateoncompletion'] == "yes"
+        self.wait_for_all_sims = runtime_dict['workload']['wait_for_all_sims'] == "yes"
 
     def __str__(self):
         return pprint.pformat(vars(self))
@@ -355,8 +447,13 @@ class RuntimeConfig:
             self.innerconf.trace_output_format,
             self.innerconf.autocounter_readrate, self.innerconf.terminateoncompletion,
             self.innerconf.zerooutdram,
-            self.innerconf.print_start, self.innerconf.print_end,
-            self.innerconf.print_cycle_prefix)
+            self.innerconf.high_priority_obuf_size,
+            self.innerconf.low_priority_obuf_size,
+            self.innerconf.wait_for_all_sims,
+            self.innerconf.default_timeout_cycles,
+            self.innerconf.default_rtt_pkts,
+            self.innerconf.load_gen_stats,
+            self.innerconf.raft_cluster)
 
     def launch_run_farm(self):
         """ directly called by top-level launchrunfarm command. """

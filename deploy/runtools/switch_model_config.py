@@ -63,7 +63,49 @@ class AbstractSwitchToSwitchConfig:
         constructedstring += self.get_numclientsconfig()
         constructedstring += self.get_portsetup()
         constructedstring += self.get_mac2port()
+        constructedstring += self.get_load_gen_stats()
         return constructedstring
+    
+    def get_load_gen_stats(self):
+        load_gen_stats = self.fsimswitchnode.load_gen_stats
+        if not load_gen_stats.use_load_gen:
+            return ""
+        
+        restr = """
+    #ifdef LOADGENSTATS
+    #define USE_LOAD_GEN
+    char* test_type = "{}";
+    char* load_type = "{}";
+    char* service_dist_type = "{}";
+    char* request_dist_type = "{}";
+    uint64_t num_requests = {};
+    uint64_t request_rate_lambda_inverse_start = {};
+    uint64_t request_rate_lambda_inverse_stop = {};
+    uint64_t request_rate_lambda_inverse_dec = {};
+    uint64_t min_service_time = {};
+    uint64_t max_service_time = {};
+    uint64_t min_service_key = {};
+    uint64_t max_service_key = {};
+    double exp_dist_scale_factor = {};
+    double exp_dist_decay_const = {};
+    double bimodal_dist_high_mean = {};
+    double bimodal_dist_high_stdev = {};
+    double bimodal_dist_low_mean = {};
+    double bimodal_dist_low_stdev = {};
+    double bimodal_dist_fraction_high = {};
+    uint64_t fixed_dist_cycles = {};
+    uint16_t rtt_pkts = {};
+    #endif
+    """.format(load_gen_stats.test_type, load_gen_stats.load_type, load_gen_stats.service_dist_type, load_gen_stats.request_dist_type,
+               load_gen_stats.num_requests, load_gen_stats.request_rate_lambda_inverse_start,
+               load_gen_stats.request_rate_lambda_inverse_stop, load_gen_stats.request_rate_lambda_inverse_dec,
+               load_gen_stats.min_service_time, load_gen_stats.max_service_time,
+               load_gen_stats.min_service_key, load_gen_stats.max_service_key,
+               load_gen_stats.exp_dist_scale_factor,
+               load_gen_stats.exp_dist_decay_const, load_gen_stats.bimodal_dist_high_mean, load_gen_stats.bimodal_dist_high_stdev,
+               load_gen_stats.bimodal_dist_low_mean, load_gen_stats.bimodal_dist_low_stdev, load_gen_stats.bimodal_dist_fraction_high,
+               load_gen_stats.fixed_dist_cycles, load_gen_stats.rtt_pkts)
+        return restr
 
     # produce mac2port array portion of config
     def get_mac2port(self):
@@ -83,8 +125,9 @@ class AbstractSwitchToSwitchConfig:
         retstr = """
     #ifdef MACPORTSCONFIG
     uint16_t mac2port[{}]  {}
+    #define NUMIPSKNOWN {}
     #endif
-    """.format(len(mac2port_pythonarray), commaseparated)
+    """.format(len(mac2port_pythonarray), commaseparated, len(mac2port_pythonarray))
         return retstr
 
     def get_header(self):
@@ -167,8 +210,10 @@ class AbstractSwitchToSwitchConfig:
         switchlatency = self.fsimswitchnode.switch_switching_latency
         linklatency = self.fsimswitchnode.switch_link_latency
         bandwidth = self.fsimswitchnode.switch_bandwidth
+        high_priority_obuf_size = self.fsimswitchnode.high_priority_obuf_size
+        low_priority_obuf_size = self.fsimswitchnode.low_priority_obuf_size
         # insert gdb -ex run --args between sudo and ./ below to start switches in gdb
-        return """screen -S {} -d -m bash -c "script -f -c 'sudo ./{} {} {} {}' switchlog"; sleep 1""".format(self.switch_binary_name(), self.switch_binary_name(), linklatency, switchlatency, bandwidth)
+        return """screen -S {} -d -m bash -c "script -f -c 'sudo ./{} {} {} {} {} {}' switchlog"; sleep 1""".format(self.switch_binary_name(), self.switch_binary_name(), linklatency, switchlatency, bandwidth, high_priority_obuf_size, low_priority_obuf_size)
 
     def kill_switch_simulation_command(self):
         """ Return the command to kill the switch. """
