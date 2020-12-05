@@ -116,6 +116,15 @@ struct __attribute__((__packed__)) mica_hdr_t {
   uint64_t value[MICA_VALUE_SIZE_WORDS];
 };
 
+struct __attribute__((__packed__)) intersect_hdr_t {
+  uint64_t query_word_cnt;
+  uint64_t query_word_ids[16];
+};
+struct __attribute__((__packed__)) resp_intersect_hdr_t {
+  uint64_t doc_cnt;
+  uint64_t doc_ids[16];
+};
+
 #define CHAINREP_FLAGS_FROM_TESTER    (1 << 7)
 #define CHAINREP_FLAGS_OP_READ        (1 << 6)
 #define CHAINREP_FLAGS_OP_WRITE       (1 << 5)
@@ -541,6 +550,20 @@ void log_packet_response_time(parsed_packet_t* packet) {
         uint32_t resp_type = be32toh(resp_msg->resp_type);
         fprintf(stdout, "Raft message response type is %d\n", resp_type);
     }
+#if 0
+    // Verify INTERSECT response:
+    uint16_t msg_len = ntohs(packet->lnic->getLnicHeader()->msg_len);
+    if (msg_len > 16) {
+      struct resp_intersect_hdr_t *resp = (struct resp_intersect_hdr_t *)packet->app->getLayerPayload();
+      uint64_t doc_cnt = be64toh(resp->doc_cnt);
+      uint64_t d0 = be64toh(resp->doc_ids[0]);
+      uint64_t d1 = be64toh(resp->doc_ids[1]);
+      fprintf(stdout, "<<<<<<<< %ld docs: ", doc_cnt);
+      for (unsigned i = 0; i < doc_cnt; i++)
+        fprintf(stdout, "%ld ", be64toh(resp->doc_ids[i]));
+      fprintf(stdout, "\n");
+    }
+#endif
     // Verify MICA READ response:
     //uint16_t msg_len = ntohs(packet->lnic->getLnicHeader()->msg_len);
     //if (msg_len > 60) {
@@ -792,6 +815,21 @@ void send_load_packet(uint16_t dst_context, uint64_t service_time, uint64_t sent
       r_hdr.key[1] = htobe64(0x0);
       new_payload_layer = pcpp::PayloadLayer((uint8_t*)&r_hdr, sizeof(r_hdr), false);
       msg_len += new_payload_layer.getHeaderLen();
+    } else if (strcmp(load_type, "INTERSECT") == 0) {
+      struct intersect_hdr_t h;
+      //uint64_t word_cnt = 2 + (get_service_key(dst_context) % 3);
+      //word_cnt = 1;
+      uint64_t word_cnt = 1 + ((*service_key_uniform_dist)(*dist_rand) % 3);
+      h.query_word_cnt = htobe64(word_cnt);
+      //fprintf(stdout, ">>>>>>>> %ld words: ", word_cnt);
+      for (unsigned i = 0; i < word_cnt; i++) {
+        uint64_t word_id = get_service_key(0);
+        //fprintf(stdout, "%ld ", word_id);
+        h.query_word_ids[i] = htobe64(word_id);
+      }
+      //fprintf(stdout, "\n");
+      new_payload_layer = pcpp::PayloadLayer((uint8_t*)&h, 8 + word_cnt*8, false);
+      msg_len += new_payload_layer.getHeaderLen();
     } else if (strcmp(load_type, "RAFT_WRITE") == 0) {
         struct raft_req_header_t raft_req_hdr;
         uint64_t rand_key = (*service_key_uniform_dist)(*dist_rand);
@@ -819,6 +857,7 @@ void send_load_packet(uint16_t dst_context, uint64_t service_time, uint64_t sent
         strcmp(load_type, "CLASSIFICATION") == 0 ||
         strcmp(load_type, "CHAINREP") == 0 ||
         strcmp(load_type, "CHAINREP_READ") == 0 ||
+        strcmp(load_type, "INTERSECT") == 0 ||
         strcmp(load_type, "RAFT_WRITE") == 0 ||
         strcmp(load_type, "RAFT_READ") == 0
         )
