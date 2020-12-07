@@ -14,6 +14,7 @@
 #include <string>
 #include <sstream>
 #include <random>
+#include <set>
 
 #include <time.h>
 #include <netinet/ether.h>
@@ -22,6 +23,7 @@
 #include "EthLayer.h"
 #include "IPv4Layer.h"
 #include "classbench_trace.h"
+#include "zipf_dist.cc"
 
 #define IGNORE_PRINTF
 
@@ -275,8 +277,10 @@ bool start_message_received = false;
 uint64_t global_start_message_count = 0;
 std::exponential_distribution<double>* gen_dist;
 std::default_random_engine* gen_rand;
+std::mt19937 *dist_rand_gen;
 std::exponential_distribution<double>* service_exp_dist;
 std::uniform_int_distribution<>* service_key_uniform_dist;
+zipf_distribution<> *service_key_zipf_dist;
 std::default_random_engine* dist_rand;
 std::normal_distribution<double>* service_normal_high;
 std::normal_distribution<double>* service_normal_low;
@@ -817,17 +821,18 @@ void send_load_packet(uint16_t dst_context, uint64_t service_time, uint64_t sent
       msg_len += new_payload_layer.getHeaderLen();
     } else if (strcmp(load_type, "INTERSECT") == 0) {
       struct intersect_hdr_t h;
-      //uint64_t word_cnt = 2 + (get_service_key(dst_context) % 3);
-      //word_cnt = 1;
-      uint64_t word_cnt = 1 + ((*service_key_uniform_dist)(*dist_rand) % 3);
+      uint64_t word_cnt = 1 + ((*service_key_uniform_dist)(*dist_rand) % 4);
+      std::set<uint64_t> word_ids;
+      while (word_ids.size() != word_cnt)
+        word_ids.insert((*service_key_zipf_dist)(*dist_rand_gen));
       h.query_word_cnt = htobe64(word_cnt);
-      //fprintf(stdout, ">>>>>>>> %ld words: ", word_cnt);
-      for (unsigned i = 0; i < word_cnt; i++) {
-        uint64_t word_id = get_service_key(0);
-        //fprintf(stdout, "%ld ", word_id);
-        h.query_word_ids[i] = htobe64(word_id);
+      fprintf(stdout, ">>>>>>>> %ld words: ", word_cnt);
+      unsigned i = 0;
+      for (uint64_t word_id : word_ids) {
+        fprintf(stdout, "%ld ", word_id);
+        h.query_word_ids[i++] = htobe64(word_id);
       }
-      //fprintf(stdout, "\n");
+      fprintf(stdout, "\n");
       new_payload_layer = pcpp::PayloadLayer((uint8_t*)&h, 8 + word_cnt*8, false);
       msg_len += new_payload_layer.getHeaderLen();
     } else if (strcmp(load_type, "RAFT_WRITE") == 0) {
@@ -1217,6 +1222,11 @@ int main (int argc, char *argv[]) {
     service_normal_high = new std::normal_distribution<double>(bimodal_dist_high_mean, bimodal_dist_high_stdev);
     service_normal_low = new std::normal_distribution<double>(bimodal_dist_low_mean, bimodal_dist_low_stdev);
     service_select_dist = new std::binomial_distribution<int>(1, bimodal_dist_fraction_high);
+
+    std::random_device rd;
+    dist_rand_gen = new std::mt19937(rd());
+    service_key_zipf_dist = new zipf_distribution<>(max_service_key);
+
     if (strcmp(load_type, "RAFT_WRITE") == 0 || strcmp(load_type, "RAFT_READ") == 0) {
         is_raft = true;
         global_raft_leader_ip = be32toh(NIC_IP_BIGENDIAN);
