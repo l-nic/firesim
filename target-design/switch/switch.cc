@@ -14,6 +14,7 @@
 #include <string>
 #include <sstream>
 #include <random>
+#include <set>
 
 #include <time.h>
 #include <netinet/ether.h>
@@ -22,6 +23,8 @@
 #include "EthLayer.h"
 #include "IPv4Layer.h"
 #include "classbench_trace.h"
+#include "zipf_dist.cc"
+
 
 #define IGNORE_PRINTF
 
@@ -114,6 +117,15 @@ struct __attribute__((__packed__)) mica_hdr_t {
   uint64_t key[MICA_KEY_SIZE_WORDS];
   uint64_t key_hash;
   uint64_t value[MICA_VALUE_SIZE_WORDS];
+};
+
+struct __attribute__((__packed__)) intersect_hdr_t {
+  uint64_t query_word_cnt;
+  uint64_t query_word_ids[16];
+};
+struct __attribute__((__packed__)) resp_intersect_hdr_t {
+  uint64_t doc_cnt;
+  uint64_t doc_ids[16];
 };
 
 #define CHAINREP_FLAGS_FROM_TESTER    (1 << 7)
@@ -266,8 +278,10 @@ bool start_message_received = false;
 uint64_t global_start_message_count = 0;
 std::exponential_distribution<double>* gen_dist;
 std::default_random_engine* gen_rand;
+std::mt19937 *dist_rand_gen;
 std::exponential_distribution<double>* service_exp_dist;
 std::uniform_int_distribution<>* service_key_uniform_dist;
+zipf_distribution<> *service_key_zipf_dist;
 std::default_random_engine* dist_rand;
 std::normal_distribution<double>* service_normal_high;
 std::normal_distribution<double>* service_normal_low;
@@ -541,8 +555,22 @@ void log_packet_response_time(parsed_packet_t* packet) {
         uint32_t resp_type = be32toh(resp_msg->resp_type);
         fprintf(stdout, "Raft message response type is %d\n", resp_type);
     }
-    // Verify MICA READ response:
 #if 0
+    // Verify INTERSECT response:
+    uint16_t msg_len = ntohs(packet->lnic->getLnicHeader()->msg_len);
+    if (msg_len > 16) {
+      struct resp_intersect_hdr_t *resp = (struct resp_intersect_hdr_t *)packet->app->getLayerPayload();
+      uint64_t doc_cnt = be64toh(resp->doc_cnt);
+      uint64_t d0 = be64toh(resp->doc_ids[0]);
+      uint64_t d1 = be64toh(resp->doc_ids[1]);
+      fprintf(stdout, "<<<<<<<< %ld docs: ", doc_cnt);
+      for (unsigned i = 0; i < doc_cnt; i++)
+        fprintf(stdout, "%ld ", be64toh(resp->doc_ids[i]));
+      fprintf(stdout, "\n");
+    }
+#endif
+#if 0
+    // Verify MICA READ response:
     uint16_t msg_len = ntohs(packet->lnic->getLnicHeader()->msg_len);
     if (msg_len > 60) {
       uint64_t *msg_value = (uint64_t *)packet->app->getLayerPayload();
@@ -794,6 +822,22 @@ void send_load_packet(uint16_t dst_context, uint64_t service_time, uint64_t sent
       r_hdr.key[1] = htobe64(0x0);
       new_payload_layer = pcpp::PayloadLayer((uint8_t*)&r_hdr, sizeof(r_hdr), false);
       msg_len += new_payload_layer.getHeaderLen();
+    } else if (strcmp(load_type, "INTERSECT") == 0) {
+      struct intersect_hdr_t h;
+      uint64_t word_cnt = 1 + ((*service_key_uniform_dist)(*dist_rand) % 4);
+      std::set<uint64_t> word_ids;
+      while (word_ids.size() != word_cnt)
+        word_ids.insert((*service_key_zipf_dist)(*dist_rand_gen));
+      h.query_word_cnt = htobe64(word_cnt);
+      fprintf(stdout, ">>>>>>>> %ld words: ", word_cnt);
+      unsigned i = 0;
+      for (uint64_t word_id : word_ids) {
+        fprintf(stdout, "%ld ", word_id);
+        h.query_word_ids[i++] = htobe64(word_id);
+      }
+      fprintf(stdout, "\n");
+      new_payload_layer = pcpp::PayloadLayer((uint8_t*)&h, 8 + word_cnt*8, false);
+      msg_len += new_payload_layer.getHeaderLen();
     } else if (strcmp(load_type, "RAFT_WRITE") == 0) {
         struct raft_req_header_t raft_req_hdr;
         uint64_t rand_key = (*service_key_uniform_dist)(*dist_rand);
@@ -821,6 +865,7 @@ void send_load_packet(uint16_t dst_context, uint64_t service_time, uint64_t sent
         strcmp(load_type, "CLASSIFICATION") == 0 ||
         strcmp(load_type, "CHAINREP") == 0 ||
         strcmp(load_type, "CHAINREP_READ") == 0 ||
+        strcmp(load_type, "INTERSECT") == 0 ||
         strcmp(load_type, "RAFT_WRITE") == 0 ||
         strcmp(load_type, "RAFT_READ") == 0
         )
@@ -1180,6 +1225,11 @@ int main (int argc, char *argv[]) {
     service_normal_high = new std::normal_distribution<double>(bimodal_dist_high_mean, bimodal_dist_high_stdev);
     service_normal_low = new std::normal_distribution<double>(bimodal_dist_low_mean, bimodal_dist_low_stdev);
     service_select_dist = new std::binomial_distribution<int>(1, bimodal_dist_fraction_high);
+
+    std::random_device rd;
+    dist_rand_gen = new std::mt19937(rd());
+    service_key_zipf_dist = new zipf_distribution<>(max_service_key);
+
     if (strcmp(load_type, "RAFT_WRITE") == 0 || strcmp(load_type, "RAFT_READ") == 0) {
         is_raft = true;
         global_raft_leader_ip = be32toh(NIC_IP_BIGENDIAN);
