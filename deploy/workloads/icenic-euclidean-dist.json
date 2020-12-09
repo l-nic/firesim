@@ -1,0 +1,8 @@
+{
+	"benchmark_name": "icenic-euclidean-dist",
+	"common_simulation_outputs": [
+		"uartlog"
+	],
+	"common_bootbinary": "../../../../../software/firemarshal/icenic-workloads/icenic-euclidean-dist/icenic-euclidean-dist.riscv",
+	"common_rootfs": "../../../../../software/firemarshal/wlutil/dummy.rootfs"
+}

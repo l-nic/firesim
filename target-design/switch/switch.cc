@@ -128,6 +128,13 @@ struct __attribute__((__packed__)) resp_intersect_hdr_t {
   uint64_t doc_ids[16];
 };
 
+#define EUCLIDEAN_DIST_VECTOR_SIZE 64
+struct __attribute__((__packed__)) euclidean_dist_hdr_t {
+  uint16_t query_vector[EUCLIDEAN_DIST_VECTOR_SIZE];
+  uint64_t haystack_vector_cnt;
+  uint64_t haystack_vector_ids[12];
+};
+
 #define CHAINREP_FLAGS_FROM_TESTER    (1 << 7)
 #define CHAINREP_FLAGS_OP_READ        (1 << 6)
 #define CHAINREP_FLAGS_OP_WRITE       (1 << 5)
@@ -556,6 +563,15 @@ void log_packet_response_time(parsed_packet_t* packet) {
         fprintf(stdout, "Raft message response type is %d\n", resp_type);
     }
 #if 0
+    // Verify EUCLIDEAN_DIST response:
+    uint16_t msg_len = ntohs(packet->lnic->getLnicHeader()->msg_len);
+    if (msg_len > 16) {
+      uint64_t *resp = (uint64_t *)packet->app->getLayerPayload();
+      uint64_t closest_vector_id = be64toh(*resp);
+      fprintf(stdout, "<<<<<<<< %ld closest vector: %ld\n", 1, closest_vector_id);
+    }
+#endif
+#if 0
     // Verify INTERSECT response:
     uint16_t msg_len = ntohs(packet->lnic->getLnicHeader()->msg_len);
     if (msg_len > 16) {
@@ -838,6 +854,24 @@ void send_load_packet(uint16_t dst_context, uint64_t service_time, uint64_t sent
       fprintf(stdout, "\n");
       new_payload_layer = pcpp::PayloadLayer((uint8_t*)&h, 8 + word_cnt*8, false);
       msg_len += new_payload_layer.getHeaderLen();
+    } else if (strcmp(load_type, "EUCLIDEAN_DIST") == 0) {
+      struct euclidean_dist_hdr_t h;
+      uint64_t haystack_vector_cnt = 2 + ((*service_key_uniform_dist)(*dist_rand) % 4);
+      std::set<uint64_t> vector_ids;
+      while (vector_ids.size() != haystack_vector_cnt)
+        vector_ids.insert((*service_key_uniform_dist)(*dist_rand));
+      memset(h.query_vector, 1, sizeof(h.query_vector));
+      h.haystack_vector_cnt = htobe64(haystack_vector_cnt);
+      fprintf(stdout, ">>>>>>>> %ld vectors: ", haystack_vector_cnt);
+      unsigned i = 0;
+      for (uint64_t vector_id : vector_ids) {
+        fprintf(stdout, "%ld ", vector_id);
+        h.haystack_vector_ids[i++] = htobe64(vector_id);
+      }
+      fprintf(stdout, "\n");
+      unsigned payload_size = EUCLIDEAN_DIST_VECTOR_SIZE*sizeof(uint16_t) + 8 + haystack_vector_cnt*8;
+      new_payload_layer = pcpp::PayloadLayer((uint8_t*)&h, payload_size, false);
+      msg_len += new_payload_layer.getHeaderLen();
     } else if (strcmp(load_type, "RAFT_WRITE") == 0) {
         struct raft_req_header_t raft_req_hdr;
         uint64_t rand_key = (*service_key_uniform_dist)(*dist_rand);
@@ -866,6 +900,7 @@ void send_load_packet(uint16_t dst_context, uint64_t service_time, uint64_t sent
         strcmp(load_type, "CHAINREP") == 0 ||
         strcmp(load_type, "CHAINREP_READ") == 0 ||
         strcmp(load_type, "INTERSECT") == 0 ||
+        strcmp(load_type, "EUCLIDEAN_DIST") == 0 ||
         strcmp(load_type, "RAFT_WRITE") == 0 ||
         strcmp(load_type, "RAFT_READ") == 0
         )
