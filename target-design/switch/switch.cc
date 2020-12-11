@@ -656,6 +656,9 @@ void update_load() {
         // Move to the next load
         // Update the load generation distribution
         request_rate_lambda_inverse -= request_rate_lambda_inverse_dec;
+        // XXX(tj): using this multiplicative dec instead makes plots with more
+        // points towards max load:
+        //request_rate_lambda_inverse = request_rate_lambda_inverse * ((double)request_rate_lambda_inverse_dec/100);
         double request_rate_lambda = 1.0 / (double)request_rate_lambda_inverse;
         std::exponential_distribution<double>::param_type new_lambda(request_rate_lambda);
         gen_dist->param(new_lambda);
