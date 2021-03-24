@@ -7,7 +7,7 @@
 
 struct switchpacket {
     uint64_t timestamp;
-    uint64_t dat[200];
+    uint64_t dat[200]; // 200*64=12800 Bytes Isn't this too large for a packet?
     int amtwritten;
     int amtread;
     int sender;
@@ -18,7 +18,7 @@ typedef struct switchpacket switchpacket;
 
 class BasePort {
     public:
-        BasePort(int portNo, bool throttle);
+        BasePort(int portNo, int numBands, bool throttle);
         void write_flits_to_output();
         virtual void tick() = 0; // some ports need to do management every switching loop
         virtual void tick_pre() = 0; // some ports need to do management every switching loop
@@ -39,13 +39,18 @@ class BasePort {
         switchpacket * output_in_progress = NULL;
 
         std::queue<switchpacket*> inputqueue;
-        std::queue<switchpacket*> outputqueue_low;
-        std::queue<switchpacket*> outputqueue_high;
-
-        size_t outputqueue_low_size;
-        size_t outputqueue_high_size;
+        // // We will need to deprecate this way of managing multiple queues in a port
+        // std::queue<switchpacket*> outputqueue_low;
+        // std::queue<switchpacket*> outputqueue_high;
+        // size_t outputqueue_low_size;
+        // size_t outputqueue_high_size;
+        // // Instead manage queues in a more flexible/programmable manner
+        std::vector<std::queue<switchpacket*>> outputqueues;
+        std::vector<size_t> outputqueues_size;
 
         int push_input(switchpacket *sp);
+
+        bool outputqueues_are_empty(); 
 
     protected:
         int _portNo;
@@ -53,9 +58,12 @@ class BasePort {
 
 };
 
-BasePort::BasePort(int portNo, bool throttle)
-    : _portNo(portNo), _throttle(throttle), outputqueue_low_size(0), outputqueue_high_size(0)
+BasePort::BasePort(int portNo, int numBands, bool throttle)
+    : _portNo(portNo), _throttle(throttle) 
+    //   , outputqueue_low_size(0), outputqueue_high_size(0) // Will deprecate
 {
+    outputqueues.resize(numBands);
+    outputqueues_size.resize(numBands);
 }
 
 int BasePort::push_input(switchpacket *sp)
@@ -63,7 +71,7 @@ int BasePort::push_input(switchpacket *sp)
     int ethtype, ctrl, quanta;
 
     // Packets smaller than three flits are too small to be valid
-    if (sp->amtwritten < 3) {
+    if (sp->amtwritten < 3) { // Why can't we have packets that have 64B payload (2 flits in total)?
         printf("Warning: dropped packet with only %d flits\n", sp->amtwritten);
         return 0;
     }
@@ -80,6 +88,17 @@ int BasePort::push_input(switchpacket *sp)
 
     inputqueue.push(sp);
     return 1;
+}
+
+bool BasePort::outputqueues_are_empty() {
+    bool outputqueuesAreEmpty = True;
+    for (int i = 0; i < outputqueues.size(); i++) {
+        if (!outputqueues[i].empty()) {
+            outputqueuesAreEmpty = False;
+            break;
+        }
+    }
+    return outputqueuesAreEmpty;
 }
 
 // assumes valid
@@ -99,17 +118,27 @@ void BasePort::write_flits_to_output() {
 
     this->pauseCycles -= flitswritten;
 
-    while (!(outputqueue_low.empty()) || !(outputqueue_high.empty())) {
+    while (!outputqueues_are_empty()) {
         switchpacket *thispacket;
-        bool high_priority;
-        if (!outputqueue_high.empty()) {
-            // Strict priority, drain only high priority queue first.
-            thispacket = outputqueue_high.front();
-            high_priority = true;
-        } else {
-            thispacket = outputqueue_low.front();
-            high_priority = false;
+
+        // // Will deprecate
+        // bool high_priority;
+        // if (!outputqueue_high.empty()) {
+        //     // Strict priority, drain only high priority queue first.
+        //     thispacket = outputqueue_high.front();
+        //     high_priority = true;
+        // } else {
+        //     thispacket = outputqueue_low.front();
+        //     high_priority = false;
+        // }
+        int selectedBand;
+        for (selectedBand = 0; selectedBand < outputqueues.size(); selectedBand++) {
+            if (!outputqueues[selectedBand].empty()) {
+                thispacket = outputqueues[selectedBand].front();
+                break;
+            }
         }
+
         // first, check timing boundaries.
         uint64_t space_available = LINKLATENCY - flitswritten;
         uint64_t outputtimestamp = thispacket->timestamp;
@@ -125,13 +154,16 @@ void BasePort::write_flits_to_output() {
                 // this packet would've been dropped due to buffer overflow.
                 // so, drop it.
                 printf("overflow, drop pack: intended timestamp: %ld, current timestamp: %ld, out bufsize in # flits: %ld, diff: %ld\n", outputtimestamp, basetime + flitswritten, OUTPUT_BUF_SIZE, (int64_t)(basetime + flitswritten) - (int64_t)(outputtimestamp));
-                if (high_priority) {
-                    outputqueue_high_size -= thispacket->amtwritten * sizeof(uint64_t);
-                    outputqueue_high.pop();
-                } else {
-                    outputqueue_low.pop();
-                    outputqueue_low_size -= thispacket->amtwritten * sizeof(uint64_t);
-                }
+                // if (high_priority) {
+                //     outputqueue_high_size -= thispacket->amtwritten * sizeof(uint64_t);
+                //     outputqueue_high.pop();
+                // } else {
+                //     outputqueue_low.pop();
+                //     outputqueue_low_size -= thispacket->amtwritten * sizeof(uint64_t);
+                // }
+                outputqueues[selectedBand].pop();
+                outputqueues_size[selectedBand] -= thispacket->amtwritten * sizeof(uint64_t);
+
                 free(thispacket);
                 continue;
             }
@@ -172,13 +204,16 @@ void BasePort::write_flits_to_output() {
             }
             if (i == thispacket->amtwritten) {
                 // we finished sending this packet, so get rid of it
-                if (high_priority) {
-                    outputqueue_high.pop();
-                    outputqueue_high_size -= thispacket->amtwritten * sizeof(uint64_t);
-                } else {
-                    outputqueue_low.pop();
-                    outputqueue_low_size -= thispacket->amtwritten * sizeof(uint64_t);
-                }
+                // if (high_priority) {
+                //     outputqueue_high.pop();
+                //     outputqueue_high_size -= thispacket->amtwritten * sizeof(uint64_t);
+                // } else {
+                //     outputqueue_low.pop();
+                //     outputqueue_low_size -= thispacket->amtwritten * sizeof(uint64_t);
+                // }
+                outputqueues[selectedBand].pop();
+                outputqueues_size[selectedBand] -= thispacket->amtwritten * sizeof(uint64_t);
+                
                 free(thispacket);
             } else {
                 // we're not done sending this packet, so mark how much has been sent

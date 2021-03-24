@@ -1,4 +1,5 @@
 #include <functional>
+#include <vector>
 #include <queue>
 #include <algorithm>
 #include <stdio.h>
