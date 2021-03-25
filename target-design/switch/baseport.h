@@ -5,6 +5,8 @@
 #define MAC_ETHTYPE 0x8808
 #define PAUSE_CONTROL 0x0001
 
+#define DEFAULT_NUM_BANDS 4
+
 struct switchpacket {
     uint64_t timestamp;
     uint64_t dat[200]; // 200*64=12800 Bytes Isn't this too large for a packet?
@@ -18,7 +20,7 @@ typedef struct switchpacket switchpacket;
 
 class BasePort {
     public:
-        BasePort(int portNo, bool throttle, int numBands=2);
+        BasePort(int portNo, bool throttle, int numBands=DEFAULT_NUM_BANDS);
         void write_flits_to_output();
         virtual void tick() = 0; // some ports need to do management every switching loop
         virtual void tick_pre() = 0; // some ports need to do management every switching loop
@@ -39,18 +41,15 @@ class BasePort {
         switchpacket * output_in_progress = NULL;
 
         std::queue<switchpacket*> inputqueue;
-        // // We will need to deprecate this way of managing multiple queues in a port
-        // std::queue<switchpacket*> outputqueue_low;
-        // std::queue<switchpacket*> outputqueue_high;
-        // size_t outputqueue_low_size;
-        // size_t outputqueue_high_size;
-        // // Instead manage queues in a more flexible/programmable manner
-        std::vector<std::queue<switchpacket*>> outputqueues;
-        std::vector<size_t> outputqueues_size;
+        // By default, a BasePort has 4 bands which can be resized in initialization
+        std::vector<std::queue<switchpacket*>> outputqueues = std::vector<std::queue<switchpacket*>>(DEFAULT_NUM_BANDS);
+        std::vector<size_t> outputqueues_size = std::vector<size_t>(DEFAULT_NUM_BANDS);
 
         int push_input(switchpacket *sp);
 
         bool outputqueues_are_empty(); 
+
+        int get_numBands();
 
     protected:
         int _portNo;
@@ -60,7 +59,6 @@ class BasePort {
 
 BasePort::BasePort(int portNo, bool throttle, int numBands)
     : _portNo(portNo), _throttle(throttle) 
-    //   , outputqueue_low_size(0), outputqueue_high_size(0) // Will deprecate
 {
     outputqueues.resize(numBands);
     outputqueues_size.resize(numBands);
@@ -101,6 +99,10 @@ bool BasePort::outputqueues_are_empty() {
     return outputqueuesAreEmpty;
 }
 
+int BasePort::get_numBands() {
+    return outputqueues.size();
+}
+
 // assumes valid
 void BasePort::write_flits_to_output() {
     // 1) assume that outputbuf's valids have been cleared,
@@ -121,16 +123,6 @@ void BasePort::write_flits_to_output() {
     while (!outputqueues_are_empty()) {
         switchpacket *thispacket;
 
-        // // Will deprecate
-        // bool high_priority;
-        // if (!outputqueue_high.empty()) {
-        //     // Strict priority, drain only high priority queue first.
-        //     thispacket = outputqueue_high.front();
-        //     high_priority = true;
-        // } else {
-        //     thispacket = outputqueue_low.front();
-        //     high_priority = false;
-        // }
         int selectedBand;
         for (selectedBand = 0; selectedBand < outputqueues.size(); selectedBand++) {
             if (!outputqueues[selectedBand].empty()) {
@@ -204,13 +196,6 @@ void BasePort::write_flits_to_output() {
             }
             if (i == thispacket->amtwritten) {
                 // we finished sending this packet, so get rid of it
-                // if (high_priority) {
-                //     outputqueue_high.pop();
-                //     outputqueue_high_size -= thispacket->amtwritten * sizeof(uint64_t);
-                // } else {
-                //     outputqueue_low.pop();
-                //     outputqueue_low_size -= thispacket->amtwritten * sizeof(uint64_t);
-                // }
                 outputqueues[selectedBand].pop();
                 outputqueues_size[selectedBand] -= thispacket->amtwritten * sizeof(uint64_t);
                 

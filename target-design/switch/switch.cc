@@ -98,8 +98,14 @@ uint64_t this_iter_cycles_start = 0;
 
 #define ETHER_HEADER_SIZE          14
 #define IP_DST_FIELD_OFFSET        16 // Dest field immediately after, in same 64-bit flit
+#define IP_PROTOCOL_OFFSET         9
+#define IP_TOS_OFFSET              1
 #define IP_SUBNET_OFFSET           2
 #define IP_HEADER_SIZE             20 // TODO: Not always, just currently the case with L-NIC.
+
+#define NDP_PROTOCOL_NUM          153
+#define HOMA_PROTOCOL_NUM         154
+#define CHOPPED_PKT_SIZE          72 // Bytes, the minimum NDP packet size
 
 #define NDP_DATA_FLAG_MASK        0b1
 #define NDP_ACK_FLAG_MASK         0b10
@@ -107,10 +113,11 @@ uint64_t this_iter_cycles_start = 0;
 #define NDP_PULL_FLAG_MASK        0b1000
 #define NDP_CHOP_FLAG_MASK        0b10000
 #define NDP_HEADER_MSG_LEN_OFFSET 5
-#define NDP_PACKET_CHOPPED_SIZE   72 // Bytes, the minimum NDP packet size
 #define NDP_HEADER_SIZE           30
+static const char* ndpFlagNames[8] = {
+    "DATA", "ACK", "NACK", "PULL", "CHOP", "UNKNOWN", "UNKNOWN", "UNKNOWN"
+};
 
-// TODO: Make sure the definitions below match Homa implementation
 #define HOMA_DATA_FLAG_MASK        0b1
 #define HOMA_ACK_FLAG_MASK         0b10
 #define HOMA_NACK_FLAG_MASK        0b100
@@ -121,6 +128,9 @@ uint64_t this_iter_cycles_start = 0;
 #define HOMA_BOGUS_FLAG_MASK       0b10000000
 #define HOMA_HEADER_MSG_LEN_OFFSET 5
 #define HOMA_HEADER_SIZE           30
+static const char* homaFlagNames[8] = {
+    "DATA", "ACK", "NACK", "GRANT", "CHOP", "RESEND", "BUSY", "BOGUS"
+};
 
 #define MICA_R_TYPE 1
 #define MICA_W_TYPE 2
@@ -220,6 +230,7 @@ uint32_t next_trace_idx = 0;
 #undef LOADGENSTATS
 #ifdef USE_LOAD_GEN
 #include "NdpLayer.h"
+#include "HomaLayer.h"
 #include "AppLayer.h"
 #include "PayloadLayer.h"
 class parsed_packet_t {
@@ -228,7 +239,8 @@ class parsed_packet_t {
  public:
     pcpp::EthLayer* eth;
     pcpp::IPv4Layer* ip;
-    pcpp::NdpLayer* ndp; // TODO: Make this configurable for Homa compatibility
+    pcpp::NdpLayer* ndp;
+    pcpp::HomaLayer* homa;
     pcpp::AppLayer* app;
     switchpacket* tsp;
 
@@ -257,15 +269,17 @@ class parsed_packet_t {
         pcpp::EthLayer* eth_layer = parsed_packet->getLayerOfType<pcpp::EthLayer>();
         pcpp::IPv4Layer* ip_layer = parsed_packet->getLayerOfType<pcpp::IPv4Layer>();
         pcpp::NdpLayer* ndp_layer = (pcpp::NdpLayer*)parsed_packet->getLayerOfType(pcpp::NDP, 0);
+        pcpp::HomaLayer* homa_layer = (pcpp::HomaLayer*)parsed_packet->getLayerOfType(pcpp::HOMA, 0);
         pcpp::AppLayer* app_layer = (pcpp::AppLayer*)parsed_packet->getLayerOfType(pcpp::GenericPayload, 0);
-        if (!eth_layer || !ip_layer || !ndp_layer || !app_layer) {
+        if (!eth_layer || !ip_layer || (!ndp_layer && !homa_layer) || !app_layer) {
             if (!eth_layer) fprintf(stdout, "Null eth layer\n");
             if (!ip_layer) fprintf(stdout, "Null ip layer\n");
-            if (!ndp_layer) fprintf(stdout, "Null ndp layer\n");
+            if (!ndp_layer && !homa_layer) fprintf(stdout, "Null transport layer\n");
             if (!app_layer) fprintf(stdout, "Null app layer\n");
             this->eth = nullptr;
             this->ip = nullptr;
             this->ndp = nullptr;
+            this->homa = nullptr;
             this->app = nullptr;
             this->tsp = nullptr;
             delete parsed_packet;
@@ -275,6 +289,7 @@ class parsed_packet_t {
         this->eth = eth_layer;
         this->ip = ip_layer;
         this->ndp = ndp_layer;
+        this->homa = homa_layer;
         this->app = app_layer;
         this->tsp = tsp;
         this->pcpp_packet = parsed_packet;
@@ -507,15 +522,28 @@ for (int port = 0; port < NUMPORTS; port++) {
 // Load generator specific code begin
 #ifdef USE_LOAD_GEN
 void print_packet(char* direction, parsed_packet_t* packet) {
-    // TODO: Make this configurable for Homa compatibility
-    uint16_t msg_len = ntohs(packet->lnic->getNdpHeader()->msg_len);
+    
+    uint8_t l4_protocol = (packet->ip->getIPv4Header()->protocol);
+    uint16_t msg_len;
+    if (l4_protocol == NDP_PROTOCOL_NUM)
+        msg_len = ntohs(packet->ndp->getNdpHeader()->msg_len);
+    else if (l4_protocol == HOMA_PROTOCOL_NUM)
+        msg_len = ntohs(packet->homa->getHomaHeader()->msg_len);
+    else 
+        msg_len = ntohs(packet->ip->getIPv4Header()->totalLength) - sizeof(iphdr);
     uint64_t* payload_base = (uint64_t*)packet->app->getLayerPayload();
     uint64_t* last_word = payload_base + (msg_len / sizeof(uint64_t)) - 3;
 
-    fprintf(stdout, "%s IP(src=%s, dst=%s), %s, %s, packet_len=%d, timestamp=%ld, last_word=%ld\n", direction,
-            packet->ip->getSrcIpAddress().toString().c_str(), packet->ip->getDstIpAddress().toString().c_str(),
-            packet->ndp->toString().c_str(), packet->app->toString().c_str(), packet->tsp->amtwritten * sizeof(uint64_t),
-            packet->tsp->timestamp, be64toh(*last_word));
+    fprintf(stdout, "%s IP(src=%s, dst=%s), ", direction, packet->ip->getSrcIpAddress().toString().c_str(), 
+            packet->ip->getDstIpAddress().toString().c_str());
+    if (l4_protocol == NDP_PROTOCOL_NUM)
+        fprintf(stdout, "%s, ", packet->ndp->toString().c_str());
+    else if (l4_protocol == HOMA_PROTOCOL_NUM)
+        fprintf(stdout, "%s, ", packet->homa->toString().c_str());
+    else 
+        fprintf(stdout, "!Transport Layer Not Recognised! ");
+    fprintf(stdout, "%s, packet_len=%d, timestamp=%ld, last_word=%ld\n", packet->app->toString().c_str(), 
+            packet->tsp->amtwritten * sizeof(uint64_t), packet->tsp->timestamp, be64toh(*last_word));
 }
 
 bool count_start_message() {
@@ -769,7 +797,7 @@ void send_load_packet(uint16_t dst_context, uint64_t service_time, uint64_t sent
     new_ip_layer.getIPv4Header()->ipId = htons(1);
     new_ip_layer.getIPv4Header()->timeToLive = 64;
     // TODO: Make this configurable for Homa compatibility
-    new_ip_layer.getIPv4Header()->protocol = 153; // Protocol code for NDP
+    new_ip_layer.getIPv4Header()->protocol = NDP_PROTOCOL_NUM; // Protocol code for NDP
 
     uint16_t tx_msg_id = get_next_tx_msg_id();
 
@@ -1003,7 +1031,7 @@ bool load_gen_hook(switchpacket* tsp) {
         pcpp::IPv4Layer new_ip_layer(packet.ip->getDstIpAddress(), packet.ip->getSrcIpAddress());
         new_ip_layer.getIPv4Header()->ipId = htons(1);
         new_ip_layer.getIPv4Header()->timeToLive = 64;
-        new_ip_layer.getIPv4Header()->protocol = 153; // Protocol code for NDP
+        new_ip_layer.getIPv4Header()->protocol = NDP_PROTOCOL_NUM; // Protocol code for NDP
         pcpp::NdpLayer new_ndp_layer(flags, ntohs(ndp_hdr->dst_context), ntohs(ndp_hdr->src_context),
                                        ntohs(ndp_hdr->msg_len), ndp_hdr->pkt_offset, pull_offset,
                                        ntohs(ndp_hdr->tx_msg_id), ntohs(ndp_hdr->buf_ptr), ndp_hdr->buf_size_class);
@@ -1094,28 +1122,70 @@ void generate_load_packets() {
 // Load generator specific code end.
 #endif
 
-// TODO: Make this configurable for Homa compatibilty
+std::string flags_to_string (uint8_t flags, const char* flagNames[], 
+                             const std::string delimiter)
+{
+  std::string flagsDescription = "";
+  for (uint8_t i = 0; i < 8; ++i)
+    {
+      if (flags & (1 << i))
+        {
+          if (flagsDescription.length () > 0)
+            {
+              flagsDescription += delimiter;
+            }
+          flagsDescription.append (flagNames[i]);
+        }
+    }
+  return flagsDescription;
+}
+
 void send_with_priority(uint16_t port, switchpacket* tsp) {
-    uint8_t ndp_header_flags = *((uint8_t*)tsp->dat + ETHER_HEADER_SIZE + IP_HEADER_SIZE);
-    bool is_data = ndp_header_flags & NDP_DATA_FLAG_MASK;
-    bool is_ack = ndp_header_flags & NDP_ACK_FLAG_MASK;
-    bool is_nack = ndp_header_flags & NDP_NACK_FLAG_MASK;
-    bool is_pull = ndp_header_flags & NDP_PULL_FLAG_MASK;
-    bool is_chop = ndp_header_flags & NDP_CHOP_FLAG_MASK;
+
     uint64_t packet_size_bytes = tsp->amtwritten * sizeof(uint64_t);
-    
-    uint64_t ndp_msg_len_bytes_offset = (uint64_t)tsp->dat + ETHER_HEADER_SIZE + IP_HEADER_SIZE + NDP_HEADER_MSG_LEN_OFFSET;
-    uint16_t ndp_msg_len_bytes = *(uint16_t*)ndp_msg_len_bytes_offset;
-    ndp_msg_len_bytes = __builtin_bswap16(ndp_msg_len_bytes);
+    uint64_t packet_data_size = packet_size_bytes - ETHER_HEADER_SIZE - IP_HEADER_SIZE;
+    uint64_t packet_msg_words_offset = (uint64_t)tsp->dat + ETHER_HEADER_SIZE + IP_HEADER_SIZE;
 
-    uint64_t ndp_src_context_offset = (uint64_t)tsp->dat + ETHER_HEADER_SIZE + IP_HEADER_SIZE + 1;
-    uint64_t ndp_dst_context_offset = (uint64_t)tsp->dat + ETHER_HEADER_SIZE + IP_HEADER_SIZE + 3;
-    uint16_t ndp_src_context = __builtin_bswap16(*(uint16_t*)ndp_src_context_offset);
-    uint16_t ndp_dst_context = __builtin_bswap16(*(uint16_t*)ndp_dst_context_offset);
+    uint8_t l4_protocol = *((uint8_t*)tsp->dat + ETHER_HEADER_SIZE + IP_PROTOCOL_OFFSET);
 
-    uint64_t packet_data_size = packet_size_bytes - ETHER_HEADER_SIZE - IP_HEADER_SIZE - NDP_HEADER_SIZE;
-    uint64_t packet_msg_words_offset = (uint64_t)tsp->dat + ETHER_HEADER_SIZE + IP_HEADER_SIZE + NDP_HEADER_SIZE;
+    uint8_t l4_header_flags;
+    uint64_t l4_msg_len_bytes_offset;
+    uint64_t l4_src_context_offset;
+    uint64_t l4_dst_context_offset;
+
+    if (l4_protocol == NDP_PROTOCOL_NUM) { // This is an NDP Packet
+        packet_data_size -= NDP_HEADER_SIZE;
+        packet_msg_words_offset += NDP_HEADER_SIZE;
+
+        l4_header_flags = *((uint8_t*)tsp->dat + ETHER_HEADER_SIZE + IP_HEADER_SIZE);
+        l4_src_context_offset = (uint64_t)tsp->dat + ETHER_HEADER_SIZE + IP_HEADER_SIZE + 1;
+        l4_dst_context_offset = (uint64_t)tsp->dat + ETHER_HEADER_SIZE + IP_HEADER_SIZE + 3;
+        l4_msg_len_bytes_offset = (uint64_t)tsp->dat + ETHER_HEADER_SIZE + IP_HEADER_SIZE + NDP_HEADER_MSG_LEN_OFFSET;
+    }
+    else if (l4_protocol == HOMA_PROTOCOL_NUM) { // This is a Homa Packet
+        packet_data_size -= HOMA_HEADER_SIZE;
+        packet_msg_words_offset += HOMA_HEADER_SIZE;
+
+        l4_header_flags = *((uint8_t*)tsp->dat + ETHER_HEADER_SIZE + IP_HEADER_SIZE);
+        l4_src_context_offset = (uint64_t)tsp->dat + ETHER_HEADER_SIZE + IP_HEADER_SIZE + 1;
+        l4_dst_context_offset = (uint64_t)tsp->dat + ETHER_HEADER_SIZE + IP_HEADER_SIZE + 3;
+        l4_msg_len_bytes_offset = (uint64_t)tsp->dat + ETHER_HEADER_SIZE + IP_HEADER_SIZE + HOMA_HEADER_MSG_LEN_OFFSET;
+    }
+    else { // This is an unknown packet drop it
+#ifdef LOG_EVENTS
+        fprintf(stdout, "&&CSV&&Events,DroppedUnknown,%ld,%d\n", this_iter_cycles_start, port);
+#endif // LOG_EVENTS
+        free(tsp);
+        return;
+    }
+
     uint64_t* packet_msg_words = (uint64_t*)packet_msg_words_offset;
+
+    uint16_t l4_msg_len_bytes = *(uint16_t*)l4_msg_len_bytes_offset;
+    l4_msg_len_bytes = __builtin_bswap16(l4_msg_len_bytes);
+
+    uint16_t l4_src_context = __builtin_bswap16(*(uint16_t*)l4_src_context_offset);
+    uint16_t l4_dst_context = __builtin_bswap16(*(uint16_t*)l4_dst_context_offset);
 
 #ifdef LOG_ALL_PACKETS
     struct timeval format_time;
@@ -1124,73 +1194,88 @@ void send_with_priority(uint16_t port, switchpacket* tsp) {
     pcpp::RawPacket raw_packet((const uint8_t*)tsp->dat, 200*sizeof(uint64_t), format_time, false, pcpp::LINKTYPE_ETHERNET);
     pcpp::Packet parsed_packet(&raw_packet);
     pcpp::IPv4Layer* ip_layer = parsed_packet.getLayerOfType<pcpp::IPv4Layer>();
-    std::string ip_src_addr = ip_layer->getSrcIpAddress().toString();
-    std::string ip_dst_addr = ip_layer->getDstIpAddress().toString();
     std::string flags_str;
-    flags_str += is_data ? "DATA" : "";
-    flags_str += is_ack ? " ACK" : "";
-    flags_str += is_nack ? " NACK" : "";
-    flags_str += is_pull ? " PULL" : "";
-    flags_str += is_chop ? " CHOP" : "";
-    fprintf(stdout, "%ld: IP(src=%s, dst=%s), NDP(flags=%s, msg_len=%d, src_context=%d, dst_context=%d), packet_len=%d, port=%d\n",
-                     tsp->timestamp, ip_src_addr.c_str(), ip_dst_addr.c_str(), flags_str.c_str(), ndp_msg_len_bytes,
-                     ndp_src_context, ndp_dst_context, packet_size_bytes, port);
+    std::string l4_protocol_name = "UNKNOWN";
+    if (l4_protocol == NDP_PROTOCOL_NUM) {
+        flags_str = flags_to_string(l4_header_flags, ndpFlagNames, " ");
+        l4_protocol_name = "NDP";
+    }
+    else if (l4_protocol == HOMA_PROTOCOL_NUM) {
+        flags_str = flags_to_string(l4_header_flags, homaFlagNames, " ");
+        l4_protocol_name = "HOMA";
+    }
+    fprintf(stdout, "%ld: IP(src=%s, dst=%s), %s(flags=%s, msg_len=%d, src_context=%d, dst_context=%d), packet_len=%d, port=%d\n",
+                     tsp->timestamp, ip_layer->getSrcIpAddress().toString().c_str(), 
+                     ip_layer->getDstIpAddress().toString().c_str(), l4_protocol_name.c_str(), 
+                     flags_str.c_str(), l4_msg_len_bytes, l4_src_context, l4_dst_context, packet_size_bytes, port);
 #endif // LOG_ALL_PACKETS
 
-    if (is_data && !is_chop) {
-        // Regular data, send to low priority queue or chop and send to high priority
-        // queue if low priority queue is full.
-        if (packet_size_bytes + ports[port]->outputqueues_size[1] < LOW_PRIORITY_OBUF_SIZE) {
-            ports[port]->outputqueues[1].push(tsp);
-            ports[port]->outputqueues_size[1] += packet_size_bytes;
-        } else {
+    int selectedBand = NUM_BANDS - 1; // By default select the lowest priority band to enqueue, then update it
+    if (l4_protocol == NDP_PROTOCOL_NUM) {
+        if (l4_header_flags & NDP_CHOP_FLAG_MASK)
+            selectedBand = 0;
+        else if (l4_header_flags & NDP_DATA_FLAG_MASK)
+            selectedBand = 1;
+        else
+            selectedBand = 0;
+    } 
+    else if (l4_protocol == HOMA_PROTOCOL_NUM) {
+        uint8_t tos = *((uint8_t*)tsp->dat + ETHER_HEADER_SIZE + IP_TOS_OFFSET);
+        selectedBand = std::min((int)tos, NUM_BANDS);
+    }
+
+    int OBUF_SIZE = (selectedBand == 0) ? HIGH_PRIORITY_OBUF_SIZE : LOW_PRIORITY_OBUF_SIZE;
+
+    if (packet_size_bytes + ports[port]->outputqueues_size[selectedBand] < OBUF_SIZE) {
+        ports[port]->outputqueues[selectedBand].push(tsp);
+        ports[port]->outputqueues_size[selectedBand] += packet_size_bytes;
+    } else {
 #ifdef TRIM_PKTS
-            // Try to chop the packet
-            if (NDP_PACKET_CHOPPED_SIZE + ports[port]->outputqueues_size[0] < HIGH_PRIORITY_OBUF_SIZE) {
+        // Try to chop the packet
+        int targetBand = selectedBand;
+        if (l4_protocol == NDP_PROTOCOL_NUM)
+            targetBand = 0;
+        else if (l4_protocol == HOMA_PROTOCOL_NUM)
+            targetBand = std::min(selectedBand+1, NUM_BANDS);
+        OBUF_SIZE = (targetBand == 0) ? HIGH_PRIORITY_OBUF_SIZE : LOW_PRIORITY_OBUF_SIZE;
+
+        if (CHOPPED_PKT_SIZE + ports[port]->outputqueues_size[targetBand] < OBUF_SIZE) {
 #ifdef LOG_EVENTS
-                fprintf(stdout, "&&CSV&&Events,Chopped,%ld,%d\n", this_iter_cycles_start, port);
+            fprintf(stdout, "&&CSV&&Events,Chopped,%ld,%d\n", this_iter_cycles_start, port);
 #endif // LOG_EVENTS
-                switchpacket * tsp2 = (switchpacket*)calloc(sizeof(switchpacket), 1);
-                tsp2->timestamp = tsp->timestamp;
-                tsp2->amtwritten = NDP_PACKET_CHOPPED_SIZE / sizeof(uint64_t);
-                tsp2->amtread = tsp->amtread;
-                tsp2->sender = tsp->sender;
-                memcpy(tsp2->dat, tsp->dat, ETHER_HEADER_SIZE + IP_HEADER_SIZE + NDP_HEADER_SIZE);
-                uint64_t ndp_flag_offset = (uint64_t)tsp2->dat + ETHER_HEADER_SIZE + IP_HEADER_SIZE;
-                *(uint8_t*)(ndp_flag_offset) |= NDP_CHOP_FLAG_MASK;
-                free(tsp);
-                ports[port]->outputqueues[0].push(tsp2);
-                ports[port]->outputqueues_size[0] += NDP_PACKET_CHOPPED_SIZE;
+            switchpacket * tsp2 = (switchpacket*)calloc(sizeof(switchpacket), 1);
+            tsp2->timestamp = tsp->timestamp;
+            tsp2->amtwritten = CHOPPED_PKT_SIZE / sizeof(uint64_t);
+            tsp2->amtread = tsp->amtread;
+            tsp2->sender = tsp->sender;
+            memcpy(tsp2->dat, tsp->dat, CHOPPED_PKT_SIZE);
+
+            if (l4_protocol == NDP_PROTOCOL_NUM) {
+                uint64_t l4_flag_offset = (uint64_t)tsp2->dat + ETHER_HEADER_SIZE + IP_HEADER_SIZE;
+                *(uint8_t*)(l4_flag_offset) |= NDP_CHOP_FLAG_MASK;
+            }
+            else if (l4_protocol == HOMA_PROTOCOL_NUM) {
+                uint64_t l4_flag_offset = (uint64_t)tsp2->dat + ETHER_HEADER_SIZE + IP_HEADER_SIZE;
+                *(uint8_t*)(l4_flag_offset) |= HOMA_CHOP_FLAG_MASK;
+            }
+
+            free(tsp);
+            ports[port]->outputqueues[targetBand].push(tsp2);
+            ports[port]->outputqueues_size[targetBand] += CHOPPED_PKT_SIZE;
 
             } else {
                 // TODO: We should really drop the lowest priority packet sometimes, not always the newly arrived packet
 #ifdef LOG_EVENTS
-                fprintf(stdout, "&&CSV&&Events,DroppedData,%ld,%d\n", this_iter_cycles_start, port);
+                fprintf(stdout, "&&CSV&&Events,DroppedPkt,%ld,%d\n", this_iter_cycles_start, port);
 #endif // LOG_EVENTS
                 free(tsp);
             }
 #else // TRIM_PKTS is not defined
 #ifdef LOG_EVENTS
-            fprintf(stdout, "&&CSV&&Events,DroppedData,%ld,%d\n", this_iter_cycles_start, port);
+        fprintf(stdout, "&&CSV&&Events,DroppedPkt,%ld,%d\n", this_iter_cycles_start, port);
 #endif // LOG_EVENTS
-            free(tsp);
-#endif // TRIM_PKTS
-        }
-    } else if ((is_data && is_chop) || (!is_data && !is_chop)) {
-        // Chopped data or control, send to high priority output queue
-        if (packet_size_bytes + ports[port]->outputqueues_size[0] < HIGH_PRIORITY_OBUF_SIZE) {
-            ports[port]->outputqueues[0].push(tsp);
-            ports[port]->outputqueues_size[0] += packet_size_bytes;
-        } else {
-#ifdef LOG_EVENTS
-            fprintf(stdout, "&&CSV&&Events,DroppedControl,%ld,%d\n", this_iter_cycles_start, port);
-#endif
-            free(tsp);
-        }
-    } else {
-        fprintf(stdout, "Invalid combination: Chopped control packet. Dropping.\n");
         free(tsp);
-        // Chopped control packet. This shouldn't be possible.
+#endif // TRIM_PKTS
     }
 }
 
