@@ -18,7 +18,7 @@ typedef struct switchpacket switchpacket;
 
 class BasePort {
     public:
-        BasePort(int portNo, int numBands, bool throttle);
+        BasePort(int portNo, bool throttle, int numBands=2);
         void write_flits_to_output();
         virtual void tick() = 0; // some ports need to do management every switching loop
         virtual void tick_pre() = 0; // some ports need to do management every switching loop
@@ -58,7 +58,7 @@ class BasePort {
 
 };
 
-BasePort::BasePort(int portNo, int numBands, bool throttle)
+BasePort::BasePort(int portNo, bool throttle, int numBands)
     : _portNo(portNo), _throttle(throttle) 
     //   , outputqueue_low_size(0), outputqueue_high_size(0) // Will deprecate
 {
@@ -91,10 +91,10 @@ int BasePort::push_input(switchpacket *sp)
 }
 
 bool BasePort::outputqueues_are_empty() {
-    bool outputqueuesAreEmpty = True;
+    bool outputqueuesAreEmpty = true;
     for (int i = 0; i < outputqueues.size(); i++) {
         if (!outputqueues[i].empty()) {
-            outputqueuesAreEmpty = False;
+            outputqueuesAreEmpty = false;
             break;
         }
     }

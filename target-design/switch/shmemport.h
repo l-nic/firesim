@@ -13,7 +13,7 @@ class ShmemPort : public BasePort {
         int currentround = 0;
 };
 
-ShmemPort::ShmemPort(int portNo, char * shmemportname, bool uplink) : BasePort(portNo, !uplink) {
+ShmemPort::ShmemPort(int portNo, char * shmemportname, bool uplink) : BasePort(portNo, !uplink, NUM_BANDS) {
 #define SHMEM_EXTRABYTES 1
 #define SHMEM_NAME_SIZE 120
 

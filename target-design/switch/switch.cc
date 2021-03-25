@@ -56,6 +56,8 @@ int switchlat = 0;
 int throttle_numer = 1;
 int throttle_denom = 1;
 
+const int NUM_BANDS = 4; // Number of queues on a port
+
 // uncomment to use a limited output buffer size, OUTPUT_BUF_SIZE
 //#define LIMITED_BUFSIZE
 
@@ -99,14 +101,26 @@ uint64_t this_iter_cycles_start = 0;
 #define IP_SUBNET_OFFSET           2
 #define IP_HEADER_SIZE             20 // TODO: Not always, just currently the case with L-NIC.
 
-#define LNIC_DATA_FLAG_MASK        0b1
-#define LNIC_ACK_FLAG_MASK         0b10
-#define LNIC_NACK_FLAG_MASK        0b100
-#define LNIC_PULL_FLAG_MASK        0b1000
-#define LNIC_CHOP_FLAG_MASK        0b10000
-#define LNIC_HEADER_MSG_LEN_OFFSET 5
-#define LNIC_PACKET_CHOPPED_SIZE   72 // Bytes, the minimum L-NIC packet size
-#define LNIC_HEADER_SIZE           30
+#define NDP_DATA_FLAG_MASK        0b1
+#define NDP_ACK_FLAG_MASK         0b10
+#define NDP_NACK_FLAG_MASK        0b100
+#define NDP_PULL_FLAG_MASK        0b1000
+#define NDP_CHOP_FLAG_MASK        0b10000
+#define NDP_HEADER_MSG_LEN_OFFSET 5
+#define NDP_PACKET_CHOPPED_SIZE   72 // Bytes, the minimum NDP packet size
+#define NDP_HEADER_SIZE           30
+
+// TODO: Make sure the definitions below match Homa implementation
+#define HOMA_DATA_FLAG_MASK        0b1
+#define HOMA_ACK_FLAG_MASK         0b10
+#define HOMA_NACK_FLAG_MASK        0b100
+#define HOMA_GRANT_FLAG_MASK       0b1000
+#define HOMA_CHOP_FLAG_MASK        0b10000
+#define HOMA_RESEND_FLAG_MASK      0b100000
+#define HOMA_BUSY_FLAG_MASK        0b1000000
+#define HOMA_BOGUS_FLAG_MASK       0b10000000
+#define HOMA_HEADER_MSG_LEN_OFFSET 5
+#define HOMA_HEADER_SIZE           30
 
 #define MICA_R_TYPE 1
 #define MICA_W_TYPE 2
@@ -192,6 +206,7 @@ trace_packet* trace_packets;
 uint32_t next_trace_idx = 0;
 
 // Comment this out to disable pkt trimming
+// TODO: Make this a command line argument for easy configuration
 #define TRIM_PKTS
 
 // TODO: these should really be exposed via config_runtime.ini
@@ -204,7 +219,7 @@ uint32_t next_trace_idx = 0;
 #include "switchconfig.h"
 #undef LOADGENSTATS
 #ifdef USE_LOAD_GEN
-#include "LnicLayer.h"
+#include "NdpLayer.h"
 #include "AppLayer.h"
 #include "PayloadLayer.h"
 class parsed_packet_t {
@@ -213,14 +228,14 @@ class parsed_packet_t {
  public:
     pcpp::EthLayer* eth;
     pcpp::IPv4Layer* ip;
-    pcpp::LnicLayer* lnic;
+    pcpp::NdpLayer* ndp; // TODO: Make this configurable for Homa compatibility
     pcpp::AppLayer* app;
     switchpacket* tsp;
 
     parsed_packet_t() {
         eth = nullptr;
         ip = nullptr;
-        lnic = nullptr;
+        ndp = nullptr;
         app = nullptr;
         tsp = nullptr;
         pcpp_packet = nullptr;
@@ -241,16 +256,16 @@ class parsed_packet_t {
         pcpp::Packet* parsed_packet = new pcpp::Packet(&raw_packet);
         pcpp::EthLayer* eth_layer = parsed_packet->getLayerOfType<pcpp::EthLayer>();
         pcpp::IPv4Layer* ip_layer = parsed_packet->getLayerOfType<pcpp::IPv4Layer>();
-        pcpp::LnicLayer* lnic_layer = (pcpp::LnicLayer*)parsed_packet->getLayerOfType(pcpp::LNIC, 0);
+        pcpp::NdpLayer* ndp_layer = (pcpp::NdpLayer*)parsed_packet->getLayerOfType(pcpp::NDP, 0);
         pcpp::AppLayer* app_layer = (pcpp::AppLayer*)parsed_packet->getLayerOfType(pcpp::GenericPayload, 0);
-        if (!eth_layer || !ip_layer || !lnic_layer || !app_layer) {
+        if (!eth_layer || !ip_layer || !ndp_layer || !app_layer) {
             if (!eth_layer) fprintf(stdout, "Null eth layer\n");
             if (!ip_layer) fprintf(stdout, "Null ip layer\n");
-            if (!lnic_layer) fprintf(stdout, "Null lnic layer\n");
+            if (!ndp_layer) fprintf(stdout, "Null ndp layer\n");
             if (!app_layer) fprintf(stdout, "Null app layer\n");
             this->eth = nullptr;
             this->ip = nullptr;
-            this->lnic = nullptr;
+            this->ndp = nullptr;
             this->app = nullptr;
             this->tsp = nullptr;
             delete parsed_packet;
@@ -259,7 +274,7 @@ class parsed_packet_t {
         }
         this->eth = eth_layer;
         this->ip = ip_layer;
-        this->lnic = lnic_layer;
+        this->ndp = ndp_layer;
         this->app = app_layer;
         this->tsp = tsp;
         this->pcpp_packet = parsed_packet;
@@ -314,8 +329,8 @@ BasePort * ports[NUMPORTS];
 void send_with_priority(uint16_t port, switchpacket* tsp);
 
 // State to keep track of the last queue size samples.
-// Index 0 is high-priority, index 1 is low-priority.
-int last_qsize_samples[NUMPORTS][2];
+// Index 0 is highest-priority
+int last_qsize_samples[NUMPORTS][NUM_BANDS];
 
 /* switch from input ports to output ports */
 void do_fast_switching() {
@@ -465,11 +480,17 @@ check_request_timeout();
 // Log queue sizes if logging is enabled
 #ifdef LOG_QUEUE_SIZE
 for (int i = 0; i < NUMPORTS; i++) {
-    if (ports[i]->outputqueue_high_size != last_qsize_samples[i][0] || ports[i]->outputqueue_low_size != last_qsize_samples[i][1]) {
-        last_qsize_samples[i][0] = ports[i]->outputqueue_high_size;
-        last_qsize_samples[i][1] = ports[i]->outputqueue_low_size;
-        fprintf(stdout, "&&CSV&&QueueSize,%ld,%d,%d,%d\n", this_iter_cycles_start, i, ports[i]->outputqueue_high_size, ports[i]->outputqueue_low_size);
+    size_t tot_queue_size = 0;
+    bool queue_size_changed = false;
+    for (int j = 0; j < NUM_BANDS ; j++) {
+        tot_queue_size += ports[i]->outputqueues_size[j];
+        if (ports[i]->outputqueues_size[j] != last_qsize_samples[i][j]) {
+            queue_size_changed = true;
+            last_qsize_samples[i][j] = ports[i]->outputqueues_size[j];
+        }
     }
+    if (queue_size_changed)
+        fprintf(stdout, "&&CSV&&QueueSize,%ld,%d,%d\n", this_iter_cycles_start, i, tot_queue_size);
 }
 #endif
 
@@ -486,13 +507,14 @@ for (int port = 0; port < NUMPORTS; port++) {
 // Load generator specific code begin
 #ifdef USE_LOAD_GEN
 void print_packet(char* direction, parsed_packet_t* packet) {
-    uint16_t msg_len = ntohs(packet->lnic->getLnicHeader()->msg_len);
+    // TODO: Make this configurable for Homa compatibility
+    uint16_t msg_len = ntohs(packet->lnic->getNdpHeader()->msg_len);
     uint64_t* payload_base = (uint64_t*)packet->app->getLayerPayload();
     uint64_t* last_word = payload_base + (msg_len / sizeof(uint64_t)) - 3;
 
     fprintf(stdout, "%s IP(src=%s, dst=%s), %s, %s, packet_len=%d, timestamp=%ld, last_word=%ld\n", direction,
             packet->ip->getSrcIpAddress().toString().c_str(), packet->ip->getDstIpAddress().toString().c_str(),
-            packet->lnic->toString().c_str(), packet->app->toString().c_str(), packet->tsp->amtwritten * sizeof(uint64_t),
+            packet->ndp->toString().c_str(), packet->app->toString().c_str(), packet->tsp->amtwritten * sizeof(uint64_t),
             packet->tsp->timestamp, be64toh(*last_word));
 }
 
@@ -537,7 +559,7 @@ void log_packet_response_time(parsed_packet_t* packet) {
     // TODO: We need to print a header as well to record what the parameters for this run were.
     uint64_t service_time = be64toh(packet->app->getAppHeader()->service_time);
     uint64_t sent_time = be64toh(packet->app->getAppHeader()->sent_time);
-    uint16_t src_context = be16toh(packet->lnic->getLnicHeader()->src_context);
+    uint16_t src_context = be16toh(packet->ndp->getNdpHeader()->src_context);
     uint64_t recv_time = packet->tsp->timestamp; // TODO: This accounts for tokens, even though sends don't. Is that a problem?
     uint64_t iter_time = this_iter_cycles_start;
     uint64_t delta_time = (recv_time > sent_time) ? (recv_time - sent_time) : 0;
@@ -545,7 +567,7 @@ void log_packet_response_time(parsed_packet_t* packet) {
       service_time, delta_time, sent_time, recv_time, iter_time, src_context, get_avg_service_time(), request_rate_lambda_inverse);
 
     if (is_raft) {
-        uint16_t msg_len = ntohs(packet->lnic->getLnicHeader()->msg_len);
+        uint16_t msg_len = ntohs(packet->ndp->getNdpHeader()->msg_len);
         if (msg_len != sizeof(raft_resp_t) + 2*sizeof(uint64_t)) {
             // Make sure response is the right length
             fprintf(stdout, "ERROR -- response message length is %d, should be %d\n", msg_len, sizeof(raft_resp_t) + 2*sizeof(uint64_t));
@@ -564,7 +586,7 @@ void log_packet_response_time(parsed_packet_t* packet) {
     }
 #if 0
     // Verify EUCLIDEAN_DIST response:
-    uint16_t msg_len = ntohs(packet->lnic->getLnicHeader()->msg_len);
+    uint16_t msg_len = ntohs(packet->ndp->getNdpHeader()->msg_len);
     if (msg_len > 16) {
       uint64_t *resp = (uint64_t *)packet->app->getLayerPayload();
       uint64_t closest_vector_id = be64toh(*resp);
@@ -573,7 +595,7 @@ void log_packet_response_time(parsed_packet_t* packet) {
 #endif
 #if 0
     // Verify INTERSECT response:
-    uint16_t msg_len = ntohs(packet->lnic->getLnicHeader()->msg_len);
+    uint16_t msg_len = ntohs(packet->ndp->getLnicHeader()->msg_len);
     if (msg_len > 16) {
       struct resp_intersect_hdr_t *resp = (struct resp_intersect_hdr_t *)packet->app->getLayerPayload();
       uint64_t doc_cnt = be64toh(resp->doc_cnt);
@@ -587,7 +609,7 @@ void log_packet_response_time(parsed_packet_t* packet) {
 #endif
 #if 0
     // Verify MICA READ response:
-    uint16_t msg_len = ntohs(packet->lnic->getLnicHeader()->msg_len);
+    uint16_t msg_len = ntohs(packet->ndp->getNdpHeader()->msg_len);
     if (msg_len > 60) {
       uint64_t *msg_value = (uint64_t *)packet->app->getLayerPayload();
       uint64_t w0 = be64toh(msg_value[0]);
@@ -598,7 +620,7 @@ void log_packet_response_time(parsed_packet_t* packet) {
 #endif
 #if 0
     // Verify classification response:
-    uint16_t msg_len = ntohs(packet->lnic->getLnicHeader()->msg_len);
+    uint16_t msg_len = ntohs(packet->ndp->getNdpHeader()->msg_len);
     if (msg_len > 32) {
       struct classification_hdr_t *h = (struct classification_hdr_t *)packet->app->getLayerPayload();
       uint32_t trace_idx = be32toh(h->trace_idx);
@@ -614,7 +636,7 @@ void log_packet_response_time(parsed_packet_t* packet) {
 }
 
 void find_raft_leader(parsed_packet_t* packet) {
-    uint16_t msg_len = ntohs(packet->lnic->getLnicHeader()->msg_len);
+    uint16_t msg_len = ntohs(packet->ndp->getNdpHeader()->msg_len);
     fprintf(stdout, "Finding raft leader recv message with length %d\n", msg_len);
     if (msg_len != sizeof(raft_resp_t) + 2*sizeof(uint64_t)) {
         // Dump anything other than raft response packets
@@ -746,16 +768,17 @@ void send_load_packet(uint16_t dst_context, uint64_t service_time, uint64_t sent
     pcpp::IPv4Layer new_ip_layer(pcpp::IPv4Address(std::string(LOAD_GEN_IP)), pcpp::IPv4Address(std::string(NIC_IP)));
     new_ip_layer.getIPv4Header()->ipId = htons(1);
     new_ip_layer.getIPv4Header()->timeToLive = 64;
-    new_ip_layer.getIPv4Header()->protocol = 153; // Protocol code for LNIC
+    // TODO: Make this configurable for Homa compatibility
+    new_ip_layer.getIPv4Header()->protocol = 153; // Protocol code for NDP
 
     uint16_t tx_msg_id = get_next_tx_msg_id();
 
-    // Build the new lnic and application packet layers
-    pcpp::LnicLayer new_lnic_layer(0, 0, 0, 0, 0, 0, 0, 0, 0);
-    new_lnic_layer.getLnicHeader()->flags = (uint8_t)LNIC_DATA_FLAG_MASK;
-    new_lnic_layer.getLnicHeader()->src_context = htons(0);
-    new_lnic_layer.getLnicHeader()->dst_context = htons(dst_context);
-    new_lnic_layer.getLnicHeader()->tx_msg_id = htons(tx_msg_id);
+    // Build the new ndp and application packet layers
+    pcpp::NdpLayer new_ndp_layer(0, 0, 0, 0, 0, 0, 0, 0, 0);
+    new_ndp_layer.getNdpHeader()->flags = (uint8_t)NDP_DATA_FLAG_MASK;
+    new_ndp_layer.getNdpHeader()->src_context = htons(0);
+    new_ndp_layer.getNdpHeader()->dst_context = htons(dst_context);
+    new_ndp_layer.getNdpHeader()->tx_msg_id = htons(tx_msg_id);
     pcpp::AppLayer new_app_layer(service_time, sent_time);
 
     if (is_raft) {
@@ -889,14 +912,15 @@ void send_load_packet(uint16_t dst_context, uint64_t service_time, uint64_t sent
         
     }
 
-    new_lnic_layer.getLnicHeader()->msg_len = htons(msg_len);
+    new_ndp_layer.getNdpHeader()->msg_len = htons(msg_len);
 
     // Join the layers into a new packet
-    uint64_t data_packet_size_bytes = ETHER_HEADER_SIZE + IP_HEADER_SIZE + LNIC_HEADER_SIZE + msg_len;
+    uint64_t data_packet_size_bytes = ETHER_HEADER_SIZE + IP_HEADER_SIZE + NDP_HEADER_SIZE + msg_len;
     pcpp::Packet new_packet(data_packet_size_bytes);
     new_packet.addLayer(&new_eth_layer);
     new_packet.addLayer(&new_ip_layer);
-    new_packet.addLayer(&new_lnic_layer);
+    // TODO: Make this configurable for Homa compatibility
+    new_packet.addLayer(&new_ndp_layer);
     new_packet.addLayer(&new_app_layer);
     if (strcmp(load_type, "MICA") == 0 ||
         strcmp(load_type, "CLASSIFICATION") == 0 ||
@@ -966,29 +990,30 @@ bool load_gen_hook(switchpacket* tsp) {
 #endif
     // Send ACK+PULL responses to DATA packets
     // TODO: This only works for one-packet messages for now
-    if (packet.lnic->getLnicHeader()->flags & LNIC_DATA_FLAG_MASK) {
+    // TODO: Why do we generate control packets from the application layer?
+    if (packet.ndp->getNdpHeader()->flags & NDP_DATA_FLAG_MASK) {
         // Calculate the ACK+PULL values
-        pcpp::lnichdr* lnic_hdr = packet.lnic->getLnicHeader();
-        uint16_t pull_offset = lnic_hdr->pkt_offset + rtt_pkts;
-        uint8_t flags = LNIC_ACK_FLAG_MASK | LNIC_PULL_FLAG_MASK;
-        uint64_t ack_packet_size_bytes = ETHER_HEADER_SIZE + IP_HEADER_SIZE + LNIC_HEADER_SIZE + APP_HEADER_SIZE;
+        pcpp::ndphdr* ndp_hdr = packet.ndp->getNdpHeader();
+        uint16_t pull_offset = ndp_hdr->pkt_offset + rtt_pkts;
+        uint8_t flags = NDP_ACK_FLAG_MASK | NDP_PULL_FLAG_MASK;
+        uint64_t ack_packet_size_bytes = ETHER_HEADER_SIZE + IP_HEADER_SIZE + NDP_HEADER_SIZE + APP_HEADER_SIZE;
 
         // Build the new packet layers
         pcpp::EthLayer new_eth_layer(packet.eth->getDestMac(), packet.eth->getSourceMac());
         pcpp::IPv4Layer new_ip_layer(packet.ip->getDstIpAddress(), packet.ip->getSrcIpAddress());
         new_ip_layer.getIPv4Header()->ipId = htons(1);
         new_ip_layer.getIPv4Header()->timeToLive = 64;
-        new_ip_layer.getIPv4Header()->protocol = 153; // Protocol code for LNIC
-        pcpp::LnicLayer new_lnic_layer(flags, ntohs(lnic_hdr->dst_context), ntohs(lnic_hdr->src_context),
-                                       ntohs(lnic_hdr->msg_len), lnic_hdr->pkt_offset, pull_offset,
-                                       ntohs(lnic_hdr->tx_msg_id), ntohs(lnic_hdr->buf_ptr), lnic_hdr->buf_size_class);
+        new_ip_layer.getIPv4Header()->protocol = 153; // Protocol code for NDP
+        pcpp::NdpLayer new_ndp_layer(flags, ntohs(ndp_hdr->dst_context), ntohs(ndp_hdr->src_context),
+                                       ntohs(ndp_hdr->msg_len), ndp_hdr->pkt_offset, pull_offset,
+                                       ntohs(ndp_hdr->tx_msg_id), ntohs(ndp_hdr->buf_ptr), ndp_hdr->buf_size_class);
         pcpp::AppLayer new_app_layer(0, 0);
 
         // Join the layers into a new packet
         pcpp::Packet new_packet(ack_packet_size_bytes);
         new_packet.addLayer(&new_eth_layer);
         new_packet.addLayer(&new_ip_layer);
-        new_packet.addLayer(&new_lnic_layer);
+        new_packet.addLayer(&new_ndp_layer);
         new_packet.addLayer(&new_app_layer);
         new_packet.computeCalculateFields();
 
@@ -1069,26 +1094,27 @@ void generate_load_packets() {
 // Load generator specific code end.
 #endif
 
+// TODO: Make this configurable for Homa compatibilty
 void send_with_priority(uint16_t port, switchpacket* tsp) {
-    uint8_t lnic_header_flags = *((uint8_t*)tsp->dat + ETHER_HEADER_SIZE + IP_HEADER_SIZE);
-    bool is_data = lnic_header_flags & LNIC_DATA_FLAG_MASK;
-    bool is_ack = lnic_header_flags & LNIC_ACK_FLAG_MASK;
-    bool is_nack = lnic_header_flags & LNIC_NACK_FLAG_MASK;
-    bool is_pull = lnic_header_flags & LNIC_PULL_FLAG_MASK;
-    bool is_chop = lnic_header_flags & LNIC_CHOP_FLAG_MASK;
+    uint8_t ndp_header_flags = *((uint8_t*)tsp->dat + ETHER_HEADER_SIZE + IP_HEADER_SIZE);
+    bool is_data = ndp_header_flags & NDP_DATA_FLAG_MASK;
+    bool is_ack = ndp_header_flags & NDP_ACK_FLAG_MASK;
+    bool is_nack = ndp_header_flags & NDP_NACK_FLAG_MASK;
+    bool is_pull = ndp_header_flags & NDP_PULL_FLAG_MASK;
+    bool is_chop = ndp_header_flags & NDP_CHOP_FLAG_MASK;
     uint64_t packet_size_bytes = tsp->amtwritten * sizeof(uint64_t);
     
-    uint64_t lnic_msg_len_bytes_offset = (uint64_t)tsp->dat + ETHER_HEADER_SIZE + IP_HEADER_SIZE + LNIC_HEADER_MSG_LEN_OFFSET;
-    uint16_t lnic_msg_len_bytes = *(uint16_t*)lnic_msg_len_bytes_offset;
-    lnic_msg_len_bytes = __builtin_bswap16(lnic_msg_len_bytes);
+    uint64_t ndp_msg_len_bytes_offset = (uint64_t)tsp->dat + ETHER_HEADER_SIZE + IP_HEADER_SIZE + NDP_HEADER_MSG_LEN_OFFSET;
+    uint16_t ndp_msg_len_bytes = *(uint16_t*)ndp_msg_len_bytes_offset;
+    ndp_msg_len_bytes = __builtin_bswap16(ndp_msg_len_bytes);
 
-    uint64_t lnic_src_context_offset = (uint64_t)tsp->dat + ETHER_HEADER_SIZE + IP_HEADER_SIZE + 1;
-    uint64_t lnic_dst_context_offset = (uint64_t)tsp->dat + ETHER_HEADER_SIZE + IP_HEADER_SIZE + 3;
-    uint16_t lnic_src_context = __builtin_bswap16(*(uint16_t*)lnic_src_context_offset);
-    uint16_t lnic_dst_context = __builtin_bswap16(*(uint16_t*)lnic_dst_context_offset);
+    uint64_t ndp_src_context_offset = (uint64_t)tsp->dat + ETHER_HEADER_SIZE + IP_HEADER_SIZE + 1;
+    uint64_t ndp_dst_context_offset = (uint64_t)tsp->dat + ETHER_HEADER_SIZE + IP_HEADER_SIZE + 3;
+    uint16_t ndp_src_context = __builtin_bswap16(*(uint16_t*)ndp_src_context_offset);
+    uint16_t ndp_dst_context = __builtin_bswap16(*(uint16_t*)ndp_dst_context_offset);
 
-    uint64_t packet_data_size = packet_size_bytes - ETHER_HEADER_SIZE - IP_HEADER_SIZE - LNIC_HEADER_SIZE;
-    uint64_t packet_msg_words_offset = (uint64_t)tsp->dat + ETHER_HEADER_SIZE + IP_HEADER_SIZE + LNIC_HEADER_SIZE;
+    uint64_t packet_data_size = packet_size_bytes - ETHER_HEADER_SIZE - IP_HEADER_SIZE - NDP_HEADER_SIZE;
+    uint64_t packet_msg_words_offset = (uint64_t)tsp->dat + ETHER_HEADER_SIZE + IP_HEADER_SIZE + NDP_HEADER_SIZE;
     uint64_t* packet_msg_words = (uint64_t*)packet_msg_words_offset;
 
 #ifdef LOG_ALL_PACKETS
@@ -1106,35 +1132,35 @@ void send_with_priority(uint16_t port, switchpacket* tsp) {
     flags_str += is_nack ? " NACK" : "";
     flags_str += is_pull ? " PULL" : "";
     flags_str += is_chop ? " CHOP" : "";
-    fprintf(stdout, "%ld: IP(src=%s, dst=%s), LNIC(flags=%s, msg_len=%d, src_context=%d, dst_context=%d), packet_len=%d, port=%d\n",
-                     tsp->timestamp, ip_src_addr.c_str(), ip_dst_addr.c_str(), flags_str.c_str(), lnic_msg_len_bytes,
-                     lnic_src_context, lnic_dst_context, packet_size_bytes, port);
+    fprintf(stdout, "%ld: IP(src=%s, dst=%s), NDP(flags=%s, msg_len=%d, src_context=%d, dst_context=%d), packet_len=%d, port=%d\n",
+                     tsp->timestamp, ip_src_addr.c_str(), ip_dst_addr.c_str(), flags_str.c_str(), ndp_msg_len_bytes,
+                     ndp_src_context, ndp_dst_context, packet_size_bytes, port);
 #endif // LOG_ALL_PACKETS
 
     if (is_data && !is_chop) {
         // Regular data, send to low priority queue or chop and send to high priority
         // queue if low priority queue is full.
-        if (packet_size_bytes + ports[port]->outputqueue_low_size < LOW_PRIORITY_OBUF_SIZE) {
-            ports[port]->outputqueue_low.push(tsp);
-            ports[port]->outputqueue_low_size += packet_size_bytes;
+        if (packet_size_bytes + ports[port]->outputqueues_size[1] < LOW_PRIORITY_OBUF_SIZE) {
+            ports[port]->outputqueues[1].push(tsp);
+            ports[port]->outputqueues_size[1] += packet_size_bytes;
         } else {
 #ifdef TRIM_PKTS
             // Try to chop the packet
-            if (LNIC_PACKET_CHOPPED_SIZE + ports[port]->outputqueue_high_size < HIGH_PRIORITY_OBUF_SIZE) {
+            if (NDP_PACKET_CHOPPED_SIZE + ports[port]->outputqueues_size[0] < HIGH_PRIORITY_OBUF_SIZE) {
 #ifdef LOG_EVENTS
                 fprintf(stdout, "&&CSV&&Events,Chopped,%ld,%d\n", this_iter_cycles_start, port);
 #endif // LOG_EVENTS
                 switchpacket * tsp2 = (switchpacket*)calloc(sizeof(switchpacket), 1);
                 tsp2->timestamp = tsp->timestamp;
-                tsp2->amtwritten = LNIC_PACKET_CHOPPED_SIZE / sizeof(uint64_t);
+                tsp2->amtwritten = NDP_PACKET_CHOPPED_SIZE / sizeof(uint64_t);
                 tsp2->amtread = tsp->amtread;
                 tsp2->sender = tsp->sender;
-                memcpy(tsp2->dat, tsp->dat, ETHER_HEADER_SIZE + IP_HEADER_SIZE + LNIC_HEADER_SIZE);
-                uint64_t lnic_flag_offset = (uint64_t)tsp2->dat + ETHER_HEADER_SIZE + IP_HEADER_SIZE;
-                *(uint8_t*)(lnic_flag_offset) |= LNIC_CHOP_FLAG_MASK;
+                memcpy(tsp2->dat, tsp->dat, ETHER_HEADER_SIZE + IP_HEADER_SIZE + NDP_HEADER_SIZE);
+                uint64_t ndp_flag_offset = (uint64_t)tsp2->dat + ETHER_HEADER_SIZE + IP_HEADER_SIZE;
+                *(uint8_t*)(ndp_flag_offset) |= NDP_CHOP_FLAG_MASK;
                 free(tsp);
-                ports[port]->outputqueue_high.push(tsp2);
-                ports[port]->outputqueue_high_size += LNIC_PACKET_CHOPPED_SIZE;
+                ports[port]->outputqueues[0].push(tsp2);
+                ports[port]->outputqueues_size[0] += NDP_PACKET_CHOPPED_SIZE;
 
             } else {
                 // TODO: We should really drop the lowest priority packet sometimes, not always the newly arrived packet
@@ -1152,9 +1178,9 @@ void send_with_priority(uint16_t port, switchpacket* tsp) {
         }
     } else if ((is_data && is_chop) || (!is_data && !is_chop)) {
         // Chopped data or control, send to high priority output queue
-        if (packet_size_bytes + ports[port]->outputqueue_high_size < HIGH_PRIORITY_OBUF_SIZE) {
-            ports[port]->outputqueue_high.push(tsp);
-            ports[port]->outputqueue_high_size += packet_size_bytes;
+        if (packet_size_bytes + ports[port]->outputqueues_size[0] < HIGH_PRIORITY_OBUF_SIZE) {
+            ports[port]->outputqueues[0].push(tsp);
+            ports[port]->outputqueues_size[0] += packet_size_bytes;
         } else {
 #ifdef LOG_EVENTS
             fprintf(stdout, "&&CSV&&Events,DroppedControl,%ld,%d\n", this_iter_cycles_start, port);
@@ -1319,9 +1345,12 @@ int main (int argc, char *argv[]) {
 #ifdef LOG_QUEUE_SIZE
     // initialize last_qsize_samples
     for (int p = 0; p < NUMPORTS; p++) {
-        last_qsize_samples[p][0] = 0; // high-priority
-        last_qsize_samples[p][1] = 0; // low-priority
-        fprintf(stdout, "&&CSV&&QueueSize,%ld,%d,%d,%d\n", this_iter_cycles_start, p, 0, 0);
+        fprintf(stdout, "&&CSV&&QueueSize,%ld,%d", this_iter_cycles_start, p);
+        for (int b = 0; b < NUM_BANDS; b++) {
+            last_qsize_samples[p][b] = 0; 
+            fprintf(stdout, ",%d", 0);
+        }
+        fprintf(stdout, "\n");
     }
 #endif
 
