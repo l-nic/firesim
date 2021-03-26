@@ -3,6 +3,7 @@ switchbuild/switch*.*.*.*
 switchbuild/switch
 results-build/*
 results-workload/*
+nanoPU-results/*
 config_runtime.ini
 config_build.ini
 config_build_recipes.ini

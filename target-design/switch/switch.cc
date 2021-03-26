@@ -658,7 +658,8 @@ void update_load() {
         // Move to the next load
         // Update the load generation distribution
         // Reduce request_rate_lambda_inverse by request_rate_lambda_inverse_dec %
-        request_rate_lambda_inverse = request_rate_lambda_inverse * ((double)request_rate_lambda_inverse_dec/100);
+        request_rate_lambda_inverse -= request_rate_lambda_inverse_dec;
+//        request_rate_lambda_inverse = request_rate_lambda_inverse * ((double)request_rate_lambda_inverse_dec/100);
         double request_rate_lambda = 1.0 / (double)request_rate_lambda_inverse;
         std::exponential_distribution<double>::param_type new_lambda(request_rate_lambda);
         gen_dist->param(new_lambda);
@@ -739,7 +740,7 @@ uint16_t get_next_tx_msg_id() {
     return to_return;
 }
 
-void send_load_packet(uint16_t dst_context, uint64_t service_time, uint64_t sent_time) {
+void send_load_packet(uint16_t dst_context, uint64_t service_time, uint64_t sent_time, bool log_request) {
     // Build the new ethernet/ip packet layers
     pcpp::EthLayer new_eth_layer(pcpp::MacAddress(LOAD_GEN_MAC), pcpp::MacAddress(NIC_MAC));
     pcpp::IPv4Layer new_ip_layer(pcpp::IPv4Address(std::string(LOAD_GEN_IP)), pcpp::IPv4Address(std::string(NIC_IP)));
@@ -934,8 +935,10 @@ void send_load_packet(uint16_t dst_context, uint64_t service_time, uint64_t sent
     uint16_t send_to_port = get_port_from_flit(switching_flit, 0);
     send_with_priority(send_to_port, new_tsp);
     tx_request_count++;
-    fprintf(stdout, "&&CSV&&RequestStats,%ld,%ld,%d,%f,%ld\n",
-      sent_time, service_time, dst_context, get_avg_service_time(), request_rate_lambda_inverse);
+    if (log_request) {
+      fprintf(stdout, "&&CSV&&RequestStats,%ld,%ld,%d,%f,%ld\n",
+        sent_time, service_time, dst_context, get_avg_service_time(), request_rate_lambda_inverse);
+    }
     // check if we are done sending requests
     if (tx_request_count >= num_requests) {
         request_tx_done = true;
@@ -947,7 +950,7 @@ void send_done_packet() {
   uint16_t dst_context = 0;
   uint64_t service_time = 0;
   uint64_t sent_time = this_iter_cycles_start;
-  send_load_packet(dst_context, service_time, sent_time);
+  send_load_packet(dst_context, service_time, sent_time, false);
 }
 
 // Returns true if this packet is for the load generator, otherwise returns
@@ -1052,20 +1055,20 @@ void generate_load_packets() {
     uint64_t sent_time = this_iter_cycles_start; // TODO: Check this
 
     if (strcmp(test_type, "ONE_CONTEXT_ONE_CORE") == 0) {
-        send_load_packet(0, service_time, sent_time);
+        send_load_packet(0, service_time, sent_time, true);
     } else if (strcmp(test_type, "ONE_CONTEXT_FOUR_CORES") == 0) {
-        send_load_packet(0, service_time, sent_time);
+        send_load_packet(0, service_time, sent_time, true);
     } else if (strcmp(test_type, "FOUR_CONTEXTS_FOUR_CORES") == 0) {
-        send_load_packet(rand() % 4, service_time, sent_time);
+        send_load_packet(rand() % 4, service_time, sent_time, true);
     } else if (strcmp(test_type, "TWO_CONTEXTS_FOUR_SHARED_CORES") == 0) {
         // send request to context 0 if low distribution is selected
         // send request to context 1 if high distribution is selected
-        send_load_packet(dist, service_time, sent_time);
+        send_load_packet(dist, service_time, sent_time, true);
     } else if ((strcmp(test_type, "DIF_PRIORITY_LNIC_DRIVEN") == 0) ||
                (strcmp(test_type, "DIF_PRIORITY_TIMER_DRIVEN") == 0) ||
                (strcmp(test_type, "HIGH_PRIORITY_C1_STALL") == 0) ||
                (strcmp(test_type, "LOW_PRIORITY_C1_STALL") == 0)) {
-        send_load_packet(rand() % 2, service_time, sent_time);
+        send_load_packet(rand() % 2, service_time, sent_time, true);
     } else {
         fprintf(stdout, "Unknown test type: %s\n", test_type);
         exit(-1);
