@@ -80,3 +80,7 @@ mv results-workload/$originaldir $resultsdir/set_intersect
 # parse the switchlog
 ./switchlog2csv.py $resultsdir/set_intersect/switch0/switchlog
 
+echo "#################################"
+echo "All Simulations Complete!"
+echo "#################################"
+
