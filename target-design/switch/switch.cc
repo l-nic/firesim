@@ -644,6 +644,8 @@ void find_raft_leader(parsed_packet_t* packet) {
     }
 }
 
+void send_done_packet(); // function prototype -- implemented below ...
+
 void update_load() {
     // We've sent and received all required requests for the current load.
     // OR we've timed out and some requests were dropped.
@@ -651,14 +653,12 @@ void update_load() {
     if (request_rate_lambda_inverse <= request_rate_lambda_inverse_stop) {
         load_generator_complete = true;
         fprintf(stdout, "---- Load Generator Complete! ----\n");
-        // TODO: Maybe we should send a "DONE" msg to the server and have it shutdown gracefully?
+        send_done_packet();
     } else {
         // Move to the next load
         // Update the load generation distribution
-        request_rate_lambda_inverse -= request_rate_lambda_inverse_dec;
-        // XXX(tj): using this multiplicative dec instead makes plots with more
-        // points towards max load:
-        //request_rate_lambda_inverse = request_rate_lambda_inverse * ((double)request_rate_lambda_inverse_dec/100);
+        // Reduce request_rate_lambda_inverse by request_rate_lambda_inverse_dec %
+        request_rate_lambda_inverse = request_rate_lambda_inverse * ((double)request_rate_lambda_inverse_dec/100);
         double request_rate_lambda = 1.0 / (double)request_rate_lambda_inverse;
         std::exponential_distribution<double>::param_type new_lambda(request_rate_lambda);
         gen_dist->param(new_lambda);
@@ -941,6 +941,13 @@ void send_load_packet(uint16_t dst_context, uint64_t service_time, uint64_t sent
         request_tx_done = true;
         request_tx_done_time = sent_time;
     }
+}
+
+void send_done_packet() {
+  uint16_t dst_context = 0;
+  uint64_t service_time = 0;
+  uint64_t sent_time = this_iter_cycles_start;
+  send_load_packet(dst_context, service_time, sent_time);
 }
 
 // Returns true if this packet is for the load generator, otherwise returns
