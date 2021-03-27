@@ -7,6 +7,7 @@ testname=lnic_test
 
 # clean the results directory
 rm -rf $resultsdir/$testname
+mkdir -p $resultsdir
 
 echo "#################################"
 echo "Running simulation: $testname"
