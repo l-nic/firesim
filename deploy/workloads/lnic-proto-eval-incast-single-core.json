@@ -1,0 +1,8 @@
+{
+	"benchmark_name": "lnic-proto-eval-incast-single-core",
+	"common_simulation_outputs": [
+		"uartlog"
+	],
+	"common_bootbinary": "../../../../../software/firemarshal/lnic-workloads/lnic-proto-eval-incast-single-core/lnic-proto-eval-incast-single-core.riscv",
+	"common_rootfs": "../../../../../software/firemarshal/wlutil/dummy.rootfs"
+}
