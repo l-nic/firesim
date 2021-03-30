@@ -83,8 +83,8 @@ def parse_uartlog(uartlog_dir):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('switchlog', type=str, help='The switchlog to parse')
-    parser.add_argument('uartlog_dir', type=str, 
+    parser.add_argument('--switchlog', type=str, help='The switchlog to parse')
+    parser.add_argument('--uartlog_dir', type=str, 
                         help='The directory that includes subdirectories of uartlog to parse')
     args = parser.parse_args()
 
