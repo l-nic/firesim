@@ -113,6 +113,7 @@ uint64_t this_iter_cycles_start = 0;
 #define NDP_PULL_FLAG_MASK        0b1000
 #define NDP_CHOP_FLAG_MASK        0b10000
 #define NDP_HEADER_MSG_LEN_OFFSET 5
+#define NDP_HEADER_PKT_IDX_OFFSET 7
 #define NDP_HEADER_SIZE           30
 static const char* ndpFlagNames[8] = {
     "DATA", "ACK", "NACK", "PULL", "CHOP", "UNKNOWN", "UNKNOWN", "UNKNOWN"
@@ -127,6 +128,7 @@ static const char* ndpFlagNames[8] = {
 #define HOMA_BUSY_FLAG_MASK        0b1000000
 #define HOMA_BOGUS_FLAG_MASK       0b10000000
 #define HOMA_HEADER_MSG_LEN_OFFSET 5
+#define HOMA_HEADER_PKT_IDX_OFFSET 7
 #define HOMA_HEADER_SIZE           30
 static const char* homaFlagNames[8] = {
     "DATA", "ACK", "NACK", "GRANT", "CHOP", "RESEND", "BUSY", "BOGUS"
@@ -223,6 +225,7 @@ uint32_t next_trace_idx = 0;
 #define LOG_QUEUE_SIZE
 #define LOG_EVENTS
 #define LOG_ALL_PACKETS
+#define LOG_PKT_TRACE
 
 // Pull in load generator parameters, if any
 #define LOADGENSTATS
@@ -1149,6 +1152,7 @@ void send_with_priority(uint16_t port, switchpacket* tsp) {
     uint8_t l4_protocol = *((uint8_t*)tsp->dat + ETHER_HEADER_SIZE + IP_PROTOCOL_OFFSET);
 
     uint8_t l4_header_flags;
+    uint64_t l4_pkt_idx_offset;
     uint64_t l4_msg_len_bytes_offset;
     uint64_t l4_src_context_offset;
     uint64_t l4_dst_context_offset;
@@ -1158,6 +1162,7 @@ void send_with_priority(uint16_t port, switchpacket* tsp) {
         packet_msg_words_offset += NDP_HEADER_SIZE;
 
         l4_header_flags = *((uint8_t*)tsp->dat + ETHER_HEADER_SIZE + IP_HEADER_SIZE);
+        l4_pkt_idx_offset = (uint64_t)tsp->dat + ETHER_HEADER_SIZE + IP_HEADER_SIZE + NDP_HEADER_PKT_IDX_OFFSET;
         l4_src_context_offset = (uint64_t)tsp->dat + ETHER_HEADER_SIZE + IP_HEADER_SIZE + 1;
         l4_dst_context_offset = (uint64_t)tsp->dat + ETHER_HEADER_SIZE + IP_HEADER_SIZE + 3;
         l4_msg_len_bytes_offset = (uint64_t)tsp->dat + ETHER_HEADER_SIZE + IP_HEADER_SIZE + NDP_HEADER_MSG_LEN_OFFSET;
@@ -1167,6 +1172,7 @@ void send_with_priority(uint16_t port, switchpacket* tsp) {
         packet_msg_words_offset += HOMA_HEADER_SIZE;
 
         l4_header_flags = *((uint8_t*)tsp->dat + ETHER_HEADER_SIZE + IP_HEADER_SIZE);
+        l4_pkt_idx_offset = (uint64_t)tsp->dat + ETHER_HEADER_SIZE + IP_HEADER_SIZE + HOMA_HEADER_PKT_IDX_OFFSET;
         l4_src_context_offset = (uint64_t)tsp->dat + ETHER_HEADER_SIZE + IP_HEADER_SIZE + 1;
         l4_dst_context_offset = (uint64_t)tsp->dat + ETHER_HEADER_SIZE + IP_HEADER_SIZE + 3;
         l4_msg_len_bytes_offset = (uint64_t)tsp->dat + ETHER_HEADER_SIZE + IP_HEADER_SIZE + HOMA_HEADER_MSG_LEN_OFFSET;
@@ -1181,11 +1187,10 @@ void send_with_priority(uint16_t port, switchpacket* tsp) {
 
     uint64_t* packet_msg_words = (uint64_t*)packet_msg_words_offset;
 
-    uint16_t l4_msg_len_bytes = *(uint16_t*)l4_msg_len_bytes_offset;
-    l4_msg_len_bytes = __builtin_bswap16(l4_msg_len_bytes);
-
+    uint16_t l4_msg_len_bytes = __builtin_bswap16(*(uint16_t*)l4_msg_len_bytes_offset);
     uint16_t l4_src_context = __builtin_bswap16(*(uint16_t*)l4_src_context_offset);
     uint16_t l4_dst_context = __builtin_bswap16(*(uint16_t*)l4_dst_context_offset);
+    uint8_t l4_pkt_idx = (*(uint8_t*)l4_pkt_idx_offset);
 
 #ifdef LOG_ALL_PACKETS
     struct timeval format_time;
@@ -1229,6 +1234,12 @@ void send_with_priority(uint16_t port, switchpacket* tsp) {
     if (packet_size_bytes + ports[port]->outputqueues_size[selectedBand] < OBUF_SIZE) {
         ports[port]->outputqueues[selectedBand].push(tsp);
         ports[port]->outputqueues_size[selectedBand] += packet_size_bytes;
+#if defined(LOG_ALL_PACKETS) && defined(LOG_PKT_TRACE)
+    fprintf(stdout, "&&CSV&&PktTrace,%ld,%s,%d,%s,%d,%s,%s,%d,%d\n", 
+                    tsp->timestamp, ip_layer->getSrcIpAddress().toString().c_str(), l4_src_context, 
+                    ip_layer->getDstIpAddress().toString().c_str(), l4_dst_context, 
+                    l4_protocol_name.c_str(), flags_str.c_str(), l4_msg_len_bytes, l4_pkt_idx);
+#endif // LOG_PKT_TRACE
     } else {
 #ifdef TRIM_PKTS
         // Try to chop the packet
