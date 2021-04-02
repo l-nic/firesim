@@ -514,6 +514,8 @@ check_request_timeout();
 
 // Log queue sizes if logging is enabled
 #ifdef LOG_QUEUE_SIZE
+// Note: We actually log the queues size every time a new packet is engueued (see below)
+//       Yet here we regularly log queue size again to account for dequeues.
 for (int i = 0; i < NUMPORTS; i++) {
     size_t tot_queue_size = 0;
     bool queue_size_changed = false;
@@ -527,7 +529,7 @@ for (int i = 0; i < NUMPORTS; i++) {
     if (queue_size_changed)
         fprintf(stdout, "&&CSV&&QueueSize,%ld,%d,%d\n", this_iter_cycles_start, i, tot_queue_size);
 }
-#endif
+#endif // LOG_QUEUE_SIZE
 
 // finally in parallel, flush whatever we can to the output queues based on timestamp
 
@@ -1299,12 +1301,20 @@ void send_with_priority(uint16_t port, switchpacket* tsp) {
     if (packet_size_bytes + ports[port]->outputqueues_size[selectedBand] < OBUF_SIZE) {
         ports[port]->outputqueues[selectedBand].push(tsp);
         ports[port]->outputqueues_size[selectedBand] += packet_size_bytes;
-#if defined(LOG_ALL_PACKETS) && defined(LOG_PKT_TRACE)
+#ifdef LOG_PKT_TRACE
     fprintf(stdout, "&&CSV&&PktTrace,%ld,%s,%d,%s,%d,%s,%s,%d,%d\n", 
                     tsp->timestamp, ip_src_addr.c_str(), l4_src_context, 
                     ip_dst_addr.c_str(), l4_dst_context, l4_protocol_name.c_str(), 
                     flags_str.c_str(), l4_msg_len_bytes, l4_pkt_idx);
 #endif // LOG_PKT_TRACE
+#ifdef LOG_QUEUE_SIZE
+    size_t tot_queue_size = 0;
+    for (int j = 0; j < ports[port]->get_numBands(); j++) {
+        tot_queue_size += ports[port]->outputqueues_size[j];
+        last_qsize_samples[port][j] = ports[port]->outputqueues_size[j];
+    }
+    fprintf(stdout, "&&CSV&&QueueSize,%ld,%d,%d\n", tsp->timestamp, port, tot_queue_size);
+#endif // LOG_QUEUE_SIZE
     } else {
 #ifdef TRIM_PKTS
         // Try to chop the packet

@@ -9,7 +9,7 @@
 
 struct switchpacket {
     uint64_t timestamp;
-    uint64_t dat[200]; // 200*64=12800 Bytes Isn't this too large for a packet?
+    uint64_t dat[200]; 
     int amtwritten;
     int amtread;
     int sender;
@@ -69,7 +69,7 @@ int BasePort::push_input(switchpacket *sp)
     int ethtype, ctrl, quanta;
 
     // Packets smaller than three flits are too small to be valid
-    if (sp->amtwritten < 3) { // Why can't we have packets that have 64B payload (2 flits in total)?
+    if (sp->amtwritten < 3) { 
         printf("Warning: dropped packet with only %d flits\n", sp->amtwritten);
         return 0;
     }
