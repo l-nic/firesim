@@ -7,7 +7,7 @@ import pandas as pd
 def parse_switchlog(switchlog):
     with open(switchlog, 'r') as f:
             readlines = f.readlines()
-    qsize_stats = {"time":[], "port":[], "hp_bytes":[], "lp_bytes":[]}
+    qsize_stats = {"time":[], "port":[], "tot_bytes":[]} #"hp_bytes":[], "lp_bytes":[]}
     event_stats = {"event":[], "time":[], "port":[]}
     pkt_trace_stats = {"time":[], "src_ip":[], "src_context":[], "dst_ip":[], "dst_context":[], "proto":[], "flags":[], "msg_len_bytes":[], "pkt_offset":[]}
     # stats logged by load generator
@@ -18,8 +18,9 @@ def parse_switchlog(switchlog):
             data = line.split(',')
             qsize_stats["time"].append(float(data[1]))
             qsize_stats["port"].append(float(data[2]))
-            qsize_stats["hp_bytes"].append(float(data[3]))
-            qsize_stats["lp_bytes"].append(float(data[4]))
+            qsize_stats["tot_bytes"].append(float(data[3]))
+            # qsize_stats["hp_bytes"].append(float(data[3]))
+            # qsize_stats["lp_bytes"].append(float(data[4]))
         elif "&&CSV&&Events" in line:
             data = line.split(',')
             event_stats["event"].append(data[1])
