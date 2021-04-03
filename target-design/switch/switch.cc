@@ -1355,6 +1355,15 @@ void send_with_priority(uint16_t port, switchpacket* tsp) {
             ports[port]->outputqueues[targetBand].push(tsp2);
             ports[port]->outputqueues_size[targetBand] += CHOPPED_PKT_SIZE;
 
+#ifdef LOG_QUEUE_SIZE
+            size_t tot_queue_size = 0;
+            for (int j = 0; j < ports[port]->get_numBands(); j++) {
+                tot_queue_size += ports[port]->outputqueues_size[j];
+                last_qsize_samples[port][j] = ports[port]->outputqueues_size[j];
+            }
+            fprintf(stdout, "&&CSV&&QueueSize,%ld,%d,%d\n", tsp->timestamp, port, tot_queue_size);
+#endif // LOG_QUEUE_SIZE
+
             } else {
                 // TODO: We should really drop the lowest priority packet sometimes, not always the newly arrived packet
 #ifdef LOG_EVENTS
@@ -1535,34 +1544,39 @@ int main (int argc, char *argv[]) {
         }
         fprintf(stdout, "&&CSV&&QueueSize,%ld,%d,%d\n", this_iter_cycles_start, p, 0);
     }
-#endif
+#endif   
 
-
+    fprintf(stdout, "Starting the switching operation.\n");
     while (true) {
-
+        
         // handle sends
+        // fprintf(stdout, "Ports sending existing packets.\n");
 #pragma omp parallel for
         for (int port = 0; port < NUMPORTS; port++) {
             ports[port]->send();
         }
 
         // handle receives. these are blocking per port
+        // fprintf(stdout, "Ports receiving new packets.\n");
 #pragma omp parallel for
         for (int port = 0; port < NUMPORTS; port++) {
             ports[port]->recv();
         }
  
+        // fprintf(stdout, "Ports preparing for the new iteration.\n");
 #pragma omp parallel for
         for (int port = 0; port < NUMPORTS; port++) {
             ports[port]->tick_pre();
         }
 
+        // fprintf(stdout, "Running fast switching.\n");
         do_fast_switching();
 
         this_iter_cycles_start += LINKLATENCY; // keep track of time
 
         // some ports need to handle extra stuff after each iteration
         // e.g. shmem ports swapping shared buffers
+        // fprintf(stdout, "Switching iteration complete.\n");
 #pragma omp parallel for
         for (int port = 0; port < NUMPORTS; port++) {
             ports[port]->tick();
