@@ -1,4 +1,7 @@
 *.pyc
+.ipynb_checkpoints
+*/.ipynb_checkpoints/*
+
 switchbuild/switch*.*.*.*
 switchbuild/switch
 results-build/*

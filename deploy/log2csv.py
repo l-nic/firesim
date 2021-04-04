@@ -60,7 +60,7 @@ def parse_uartlog(uartlog_dir):
     msg_trace_stats = {"event": [], "time":[], "client_id":[], "msg_len_bytes":[]}
 
     for (dirpath, _, filenames) in os.walk(uartlog_dir, followlinks=True):
-        for filename is filenames:
+        for filename in filenames:
             if ('uartlog' not in filename):
                 continue
 
