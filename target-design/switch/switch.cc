@@ -1361,7 +1361,7 @@ void send_with_priority(uint16_t port, switchpacket* tsp) {
                 tot_queue_size += ports[port]->outputqueues_size[j];
                 last_qsize_samples[port][j] = ports[port]->outputqueues_size[j];
             }
-            fprintf(stdout, "&&CSV&&QueueSize,%ld,%d,%d\n", tsp->timestamp, port, tot_queue_size);
+            fprintf(stdout, "&&CSV&&QueueSize,%ld,%d,%d\n", tsp2->timestamp, port, tot_queue_size);
 #endif // LOG_QUEUE_SIZE
 
             } else {
