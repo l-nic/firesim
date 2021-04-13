@@ -1367,7 +1367,7 @@ void send_with_priority(uint16_t port, switchpacket* tsp) {
             } else {
                 // TODO: We should really drop the lowest priority packet sometimes, not always the newly arrived packet
 #ifdef LOG_EVENTS
-                fprintf(stdout, "&&CSV&&Events,DroppedPkt,%ld,%d\n", this_iter_cycles_start, port);
+                fprintf(stdout, "&&CSV&&Events,DroppedPktAfterChop,%ld,%d\n", this_iter_cycles_start, port);
 #endif // LOG_EVENTS
                 free(tsp);
             }
