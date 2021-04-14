@@ -1293,10 +1293,15 @@ void send_with_priority(uint16_t port, switchpacket* tsp) {
     } 
     else if (l4_protocol == pcpp::IPProtocolTypes::PACKETPP_IPPROTO_HOMA) {
         uint8_t tos = *((uint8_t*)tsp->dat + ETHER_HEADER_SIZE + IP_TOS_OFFSET);
-        selectedBand = std::min((int)tos, NUM_BANDS);
+        selectedBand = std::min((int)tos, NUM_BANDS-1);
     }
 
     int OBUF_SIZE = (selectedBand == 0) ? HIGH_PRIORITY_OBUF_SIZE : LOW_PRIORITY_OBUF_SIZE;
+
+    // fprintf(stdout, "*******,%ld,%s,%s,%s,%s,msg_len=%d,pkt_idx=%d,selected_band=%d,obuf_size=%d,current_size=%d\n", 
+    //                 tsp->timestamp, ip_src_addr.c_str(), ip_dst_addr.c_str(), l4_protocol_name.c_str(), 
+    //                 flags_str.c_str(), l4_msg_len_bytes, l4_pkt_idx, selectedBand,OBUF_SIZE,
+    //                 ports[port]->outputqueues_size[selectedBand]);
 
     if (packet_size_bytes + ports[port]->outputqueues_size[selectedBand] < OBUF_SIZE) {
         ports[port]->outputqueues[selectedBand].push(tsp);
