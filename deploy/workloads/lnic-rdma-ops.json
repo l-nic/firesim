@@ -1,0 +1,8 @@
+{
+	"benchmark_name": "lnic-rdma-ops",
+	"common_simulation_outputs": [
+		"uartlog"
+	],
+	"common_bootbinary": "../../../../../software/firemarshal/lnic-workloads/lnic-rdma-ops/lnic-rdma-ops.riscv",
+	"common_rootfs": "../../../../../software/firemarshal/wlutil/dummy.rootfs"
+}
