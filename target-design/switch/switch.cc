@@ -118,6 +118,24 @@ struct __attribute__((__packed__)) mica_hdr_t {
   uint64_t value[MICA_VALUE_SIZE_WORDS];
 };
 
+#define RDMA_SETUP_TYPE 0
+#define RDMA_READ_TYPE 1
+#define RDMA_RESP_TYPE 6
+struct __attribute__((__packed__)) rdma_setup_hdr_t {
+  uint64_t msg_type;
+  uint64_t addr;
+};
+
+struct __attribute__((__packed__)) rdma_read_hdr_t {
+  uint64_t msg_type;
+  uint64_t addr;
+};
+
+struct __attribute__((__packed__)) rdma_resp_hdr_t {
+  uint64_t msg_type;
+  uint64_t result;
+};
+
 struct __attribute__((__packed__)) intersect_hdr_t {
   uint64_t query_word_cnt;
   uint64_t query_word_ids[16];
@@ -300,6 +318,7 @@ bool global_raft_leader_found = false;
 bool is_raft = false;
 uint32_t global_raft_leader_ip = 0;
 uint32_t raft_client_ip = 0x0a000005;
+uint64_t rdma_addr = 0; // address provided in server setup msg
 #endif
 
 // These are both set by command-line arguments. Don't change them here.
@@ -790,6 +809,15 @@ void send_load_packet(uint16_t dst_context, uint64_t service_time, uint64_t sent
       new_payload_layer = pcpp::PayloadLayer((uint8_t*)&mica_hdr, mica_hdr_size, false);
       msg_len += new_payload_layer.getHeaderLen();
     }
+    else if (strcmp(load_type, "RDMA") == 0) {
+      struct rdma_read_hdr_t rdma_read_hdr;
+      // use service_key_uniform_dist to select a random address to access
+      uint64_t target_addr = rdma_addr + 8*((*service_key_uniform_dist)(*dist_rand));
+      rdma_read_hdr.msg_type = htobe64(RDMA_READ_TYPE);
+      rdma_read_hdr.addr = htobe64(target_addr);
+      new_payload_layer = pcpp::PayloadLayer((uint8_t*)&rdma_read_hdr, sizeof(rdma_read_hdr), false);
+      msg_len += new_payload_layer.getHeaderLen();
+    }
     else if (strcmp(load_type, "CLASSIFICATION") == 0) {
       struct classification_hdr_t class_hdr;
       uint32_t trace_idx = next_trace_idx;
@@ -899,6 +927,7 @@ void send_load_packet(uint16_t dst_context, uint64_t service_time, uint64_t sent
     new_packet.addLayer(&new_lnic_layer);
     new_packet.addLayer(&new_app_layer);
     if (strcmp(load_type, "MICA") == 0 ||
+        strcmp(load_type, "RDMA") == 0 ||
         strcmp(load_type, "CLASSIFICATION") == 0 ||
         strcmp(load_type, "CHAINREP") == 0 ||
         strcmp(load_type, "CHAINREP_READ") == 0 ||
@@ -1027,12 +1056,17 @@ bool load_gen_hook(switchpacket* tsp) {
                 start_message_received = true;
                 fprintf(stdout, "---- All Start Msgs Received! ---\n");
             }
+            if (strcmp(load_type, "RDMA") == 0) {
+                // Record RDMA addr indicated in startup msg.
+                struct rdma_setup_hdr_t *setup_msg = (struct rdma_setup_hdr_t *)packet.app->getLayerPayload();
+                rdma_addr = be64toh(setup_msg->addr);
+                if (be64toh(setup_msg->msg_type) != RDMA_SETUP_TYPE) fprintf(stdout, "ERROR: Received invalid setup msg!\n");
+            }
         } else if (is_raft && !global_raft_leader_found) {
             // If this is a raft test, we need to find the raft leader first.
             rx_request_count++;
             find_raft_leader(&packet);
         } else {
-        // Raft-specific, we might need to send 
             log_packet_response_time(&packet);
             rx_request_count++;
             if (rx_request_count >= num_requests) {
