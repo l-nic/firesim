@@ -62,8 +62,8 @@ class IpAddress():
     """
     IP Addresses will start at 10.0.0.1
     """
-    next_ip_alloc = 2
-    orig_ip_alloc = 2
+    next_ip_alloc = 10
+    orig_ip_alloc = 10
     lnic_ip_prefix = 0x0A000000
 
     def __init__(self):
@@ -89,7 +89,7 @@ class IpAddress():
     @classmethod
     def reset_allocator(cls):
         """ Reset allocator back to default value. """
-        cls.next_ip_alloc = 2
+        cls.next_ip_alloc = 10
 
     @classmethod
     def next_ip_to_allocate(cls):

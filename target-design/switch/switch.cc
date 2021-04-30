@@ -229,7 +229,7 @@ uint32_t next_trace_idx = 0;
 
 // Comment this out to disable pkt trimming
 // TODO: Make this a command line argument for easy configuration
-#define TRIM_PKTS
+// #define TRIM_PKTS
 
 // TODO: these should really be exposed via config_runtime.ini
 #define LOG_QUEUE_SIZE
